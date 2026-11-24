@@ -1,42 +1,39 @@
-﻿# 从 assets/branding/wisp-logo.svg 生成各平台图标（需要本机 Microsoft Edge）
+﻿# 从 assets/branding/wisp-logo.png（1024×1024 透明底母版）生成各平台图标
 # 输出：assets/branding/png/wisp-<size>.png、crates/zed/resources 下的 app-icon*.png 与 windows/app-icon*.ico
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$svg = Join-Path $root 'assets\branding\wisp-logo.svg'
+$master = Join-Path $root 'assets\branding\wisp-logo.png'
 $outDir = Join-Path $root 'assets\branding\png'
 New-Item -ItemType Directory -Force $outDir | Out-Null
-
-$edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") |
-  Where-Object { Test-Path $_ } | Select-Object -First 1
-$svgUri = ([Uri]$svg).AbsoluteUri
 $sizes = 16, 24, 32, 48, 64, 128, 256, 512, 1024
 
-# Edge 无头模式连续多次截图偶发卡死，所以只渲染一次 1024，其余尺寸用 System.Drawing 缩放
-$master = Join-Path $outDir 'wisp-1024.png'
-Remove-Item $master -ErrorAction SilentlyContinue
-$html = Join-Path $env:TEMP 'wisp-icon-1024.html'
-"<html><body style='margin:0;background:transparent'><img src='$svgUri' width='1024' height='1024' style='display:block'></body></html>" |
-  Set-Content -Encoding UTF8 $html
-$edgeArgs = @('--headless=new', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1',
-  '--default-background-color=00000000', "--user-data-dir=$env:TEMP\wisp-edge-profile",
-  '--window-size=1024,1024', "--screenshot=$master", ([Uri]$html).AbsoluteUri)
-$p = Start-Process $edge -ArgumentList $edgeArgs -PassThru -WindowStyle Hidden
-if (-not $p.WaitForExit(60000)) { $p.Kill() }
-if (-not (Test-Path $master)) { throw 'render failed' }
-
 Add-Type -AssemblyName System.Drawing
-$src = [Drawing.Image]::FromFile($master)
-foreach ($s in $sizes | Where-Object { $_ -ne 1024 }) {
+
+function Resize-Image([Drawing.Image]$img, [int]$s) {
   $bmp = New-Object Drawing.Bitmap $s, $s, ([Drawing.Imaging.PixelFormat]::Format32bppArgb)
   $g = [Drawing.Graphics]::FromImage($bmp)
   $g.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
   $g.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-  $g.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::HighQuality
+  $g.CompositingQuality = [Drawing.Drawing2D.CompositingQuality]::HighQuality
   $g.Clear([Drawing.Color]::Transparent)
-  $g.DrawImage($src, 0, 0, $s, $s)
+  $g.DrawImage($img, 0, 0, $s, $s)
   $g.Dispose()
-  $bmp.Save((Join-Path $outDir "wisp-$s.png"), [Drawing.Imaging.ImageFormat]::Png)
-  $bmp.Dispose()
+  return $bmp
+}
+
+$src = [Drawing.Image]::FromFile($master)
+foreach ($s in $sizes) {
+  # 大比例缩小时逐级减半，避免一次缩放产生锯齿和细节闪烁
+  $cur = $src; $owned = $false
+  while ($cur.Width -gt $s * 2) {
+    $next = Resize-Image $cur ([int]($cur.Width / 2))
+    if ($owned) { $cur.Dispose() }
+    $cur = $next; $owned = $true
+  }
+  $out = Resize-Image $cur $s
+  if ($owned) { $cur.Dispose() }
+  $out.Save((Join-Path $outDir "wisp-$s.png"), [Drawing.Imaging.ImageFormat]::Png)
+  $out.Dispose()
 }
 $src.Dispose()
 
@@ -65,4 +62,6 @@ foreach ($v in '', '-dev', '-nightly', '-preview') {
   Copy-Item (Join-Path $outDir 'wisp-1024.png') (Join-Path $res "app-icon$v@2x.png") -Force
   Write-Ico (Join-Path $res "windows\app-icon$v.ico") $ico
 }
+# 欢迎页 Logo（gpui img 从内嵌资源加载）
+Copy-Item (Join-Path $outDir 'wisp-128.png') (Join-Path $root 'assets\images\wisp_logo.png') -Force
 Write-Host 'icons generated'

@@ -447,8 +447,8 @@ impl Render for WelcomePage {
                             .mb_4()
                             .gap_4()
                             .child(
-                                Icon::new(IconName::Wisp)
-                                    .size(IconSize::Custom(rems_from_px(45_f32))),
+                                // 彩色应用图标（assets/images/wisp_logo.png，由 script/gen-icons.ps1 的 128px 产物复制）
+                                gpui::img("images/wisp_logo.png").size(rems_from_px(45_f32)),
                             )
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/wisp-logo.svg" width="128" alt="Wisp">
+  <img src="assets/branding/png/wisp-256.png" width="128" alt="Wisp">
 </p>
 
 <h1 align="center">Wisp</h1>
