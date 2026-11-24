@@ -1,0 +1,28 @@
+# Wisp 工作区数据模型：workspaces.json 读写、WorkspaceStore 全局实体、主机凭据 API。
+[package]
+name = "wisp_workspaces"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/wisp_workspaces.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+gpui.workspace = true
+log.workspace = true
+paths.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+zed_credentials_provider.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
