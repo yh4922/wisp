@@ -14,5 +14,3 @@ test = false
 
 [dependencies]
 serde_json.workspace = true
-telemetry_events.workspace = true
-futures.workspace = true

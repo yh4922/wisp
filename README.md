@@ -15,6 +15,15 @@ Wisp 是 [Zed](https://github.com/zed-industries/zed)（基于 v1.29.3）的硬�
 - 新增工作区面板：一键打开本地文件夹或保存的 SSH 远程工作区
 - 界面支持简体中文 / English
 
+## 下载
+
+预编译版本发布在 [GitHub Releases](https://github.com/yh4922/wisp/releases) 页面：
+
+- `Wisp-<版本>-x86_64-setup.exe`：Windows 安装包（安装到 `%LOCALAPPDATA%\Programs\Wisp`，无需管理员权限）
+- `Wisp-<版本>-x86_64-portable.zip`：Windows 便携版，解压后运行 `Wisp\wisp.exe`
+- `wisp-remote-server-linux-<架构>.gz`：SSH 远程开发的服务端，Wisp 连接远程主机时会自动下载，一般无需手动获取
+- `SHA256SUMS.txt`：校验和
+
 ## 构建
 
 ```sh

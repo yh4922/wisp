@@ -89,6 +89,15 @@ impl EnumVariantDropdown {
     }
 }
 
+/// Formats a variant label for display and translates it into the UI language.
+fn display_label(label: &'static str, title_case: bool) -> String {
+    if title_case {
+        i18n::t_dynamic(&label.to_title_case())
+    } else {
+        i18n::t(label).to_string()
+    }
+}
+
 impl RenderOnce for EnumVariantDropdown {
     fn render(self, window: &mut ui::Window, cx: &mut ui::App) -> impl gpui::IntoElement {
         let current_value_label = self.labels[self.selected_index];
@@ -98,11 +107,7 @@ impl RenderOnce for EnumVariantDropdown {
                 for (index, &label) in self.labels.iter().enumerate() {
                     let on_change = self.on_change.clone();
                     menu = menu.toggleable_entry(
-                        if self.should_do_title_case {
-                            label.to_title_case()
-                        } else {
-                            label.to_string()
-                        },
+                        display_label(label, self.should_do_title_case),
                         index == self.selected_index,
                         IconPosition::End,
                         None,
@@ -117,11 +122,7 @@ impl RenderOnce for EnumVariantDropdown {
 
         DropdownMenu::new(
             self.id,
-            if self.should_do_title_case {
-                current_value_label.to_title_case()
-            } else {
-                current_value_label.to_string()
-            },
+            display_label(current_value_label, self.should_do_title_case),
             context_menu,
         )
         .when_some(self.aria_label, |this, label| this.aria_label(label))

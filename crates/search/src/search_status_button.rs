@@ -35,14 +35,14 @@ impl Render for SearchButton {
                 .tooltip(move |_window, cx| {
                     if let Some(focus_handle) = &focus_handle {
                         Tooltip::for_action_in(
-                            "Project Search",
+                            i18n::t("Project Search"),
                             &workspace::DeploySearch::default(),
                             focus_handle,
                             cx,
                         )
                     } else {
                         Tooltip::for_action(
-                            "Project Search",
+                            i18n::t("Project Search"),
                             &workspace::DeploySearch::default(),
                             cx,
                         )

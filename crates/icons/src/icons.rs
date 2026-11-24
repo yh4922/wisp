@@ -295,6 +295,7 @@ pub enum IconName {
     UserRoundPen,
     Warning,
     WholeWord,
+    Wisp,
     XCircle,
     XCircleFilled,
     ZedAgent,

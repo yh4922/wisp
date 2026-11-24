@@ -6,8 +6,6 @@ use gpui::TasksIncluded;
 use language::File;
 use lsp::LanguageServerId;
 
-use extension::ExtensionHostProxy;
-use extension_host::headless_host::HeadlessExtensionStore;
 use fs::Fs;
 use futures::{channel::oneshot, stream::StreamExt as _};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, PromptLevel, Task, TaskExt};
@@ -15,11 +13,9 @@ use http_client::HttpClient;
 use language::{Buffer, BufferEvent, LanguageRegistry, proto::serialize_operation};
 use node_runtime::NodeRuntime;
 use project::{
-    AgentRegistryStore, LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment,
-    ProjectPath, ToolchainStore, WorktreeId,
-    agent_server_store::AgentServerStore,
+    LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment, ProjectPath,
+    ToolchainStore, WorktreeId,
     buffer_store::{BufferStore, BufferStoreEvent},
-    context_server_store::ContextServerStore,
     debugger::{breakpoint_store::BreakpointStore, dap_store::DapStore},
     git_store::GitStore,
     image_store::ImageId,
@@ -63,12 +59,9 @@ pub struct HeadlessProject {
     pub task_store: Entity<TaskStore>,
     pub dap_store: Entity<DapStore>,
     pub breakpoint_store: Entity<BreakpointStore>,
-    pub agent_server_store: Entity<AgentServerStore>,
-    pub context_server_store: Entity<ContextServerStore>,
     pub settings_observer: Entity<SettingsObserver>,
     pub next_entry_id: Arc<AtomicUsize>,
     pub languages: Arc<LanguageRegistry>,
-    pub extensions: Entity<HeadlessExtensionStore>,
     pub git_store: Entity<GitStore>,
     pub environment: Entity<ProjectEnvironment>,
     pub profiling_collector: gpui::ProfilingCollector,
@@ -86,7 +79,6 @@ pub struct HeadlessAppState {
     pub http_client: Arc<dyn HttpClient>,
     pub node_runtime: NodeRuntime,
     pub languages: Arc<LanguageRegistry>,
-    pub extension_host_proxy: Arc<ExtensionHostProxy>,
     pub startup_time: Instant,
 }
 
@@ -114,13 +106,11 @@ impl HeadlessProject {
             http_client,
             node_runtime,
             languages,
-            extension_host_proxy: proxy,
             startup_time,
         }: HeadlessAppState,
         init_worktree_trust: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        debug_adapter_extension::init(proxy.clone(), cx);
         languages::init(languages.clone(), fs.clone(), node_runtime.clone(), cx);
 
         let worktree_store = cx.new(|cx| {
@@ -249,33 +239,7 @@ impl HeadlessProject {
             lsp_store
         });
 
-        AgentRegistryStore::init_global(cx, fs.clone(), http_client.clone());
-
-        let agent_server_store = cx.new(|cx| {
-            let mut agent_server_store = AgentServerStore::local(
-                node_runtime.clone(),
-                fs.clone(),
-                environment.clone(),
-                http_client.clone(),
-                cx,
-            );
-            agent_server_store.shared(REMOTE_SERVER_PROJECT_ID, session.clone(), cx);
-            agent_server_store
-        });
-
-        let context_server_store = cx.new(|cx| {
-            let mut context_server_store =
-                ContextServerStore::local(worktree_store.clone(), None, true, cx);
-            context_server_store.shared(REMOTE_SERVER_PROJECT_ID, session.clone());
-            context_server_store
-        });
-
         cx.subscribe(&lsp_store, Self::on_lsp_store_event).detach();
-        language_extension::init(
-            language_extension::LspAccess::ViaLspStore(lsp_store.downgrade()),
-            proxy.clone(),
-            languages.clone(),
-        );
 
         cx.subscribe(&buffer_store, |_this, _buffer_store, event, cx| {
             if let BufferStoreEvent::BufferAdded(buffer) = event {
@@ -283,15 +247,6 @@ impl HeadlessProject {
             }
         })
         .detach();
-
-        let extensions = HeadlessExtensionStore::new(
-            fs.clone(),
-            http_client.clone(),
-            paths::remote_extensions_dir().to_path_buf(),
-            proxy,
-            node_runtime,
-            cx,
-        );
 
         // local_machine -> ssh handlers
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &worktree_store);
@@ -304,8 +259,6 @@ impl HeadlessProject {
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &breakpoint_store);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &settings_observer);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &git_store);
-        session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &agent_server_store);
-        session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &context_server_store);
 
         session.add_request_handler(cx.weak_entity(), Self::handle_list_remote_directory);
         session.add_request_handler(cx.weak_entity(), Self::handle_get_path_metadata);
@@ -333,15 +286,6 @@ impl HeadlessProject {
         session.add_entity_request_handler(BufferStore::handle_update_buffer);
         session.add_entity_message_handler(BufferStore::handle_close_buffer);
 
-        session.add_request_handler(
-            extensions.downgrade(),
-            HeadlessExtensionStore::handle_sync_extensions,
-        );
-        session.add_request_handler(
-            extensions.downgrade(),
-            HeadlessExtensionStore::handle_install_extension,
-        );
-
         session.add_request_handler(cx.weak_entity(), Self::handle_spawn_kernel);
         session.add_request_handler(cx.weak_entity(), Self::handle_kill_kernel);
 
@@ -355,8 +299,6 @@ impl HeadlessProject {
         // todo(debugger): Re init breakpoint store when we set it up for collab
         BreakpointStore::init(&session);
         GitStore::init(&session);
-        AgentServerStore::init_headless(&session);
-        ContextServerStore::init_headless(&session);
 
         let (search_buffer_batches, batches) = async_channel::bounded::<SearchBufferBatch>(1);
         let search_buffer_sender = cx.spawn({
@@ -422,10 +364,7 @@ impl HeadlessProject {
             task_store,
             dap_store,
             breakpoint_store,
-            agent_server_store,
-            context_server_store,
             languages,
-            extensions,
             git_store,
             environment,
             profiling_collector: gpui::ProfilingCollector::new(startup_time),

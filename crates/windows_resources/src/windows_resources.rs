@@ -44,10 +44,10 @@ const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/mani
 pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
     let channel = option_env!("RELEASE_CHANNEL").unwrap_or("dev");
     let (icon_filename, product_name) = match channel {
-        "stable" => ("app-icon.ico", "Zed"),
-        "preview" => ("app-icon-preview.ico", "Zed Preview"),
-        "nightly" => ("app-icon-nightly.ico", "Zed Nightly"),
-        _ => ("app-icon-dev.ico", "Zed Dev"),
+        "stable" => ("app-icon.ico", "Wisp"),
+        "preview" => ("app-icon-preview.ico", "Wisp Preview"),
+        "nightly" => ("app-icon-nightly.ico", "Wisp Nightly"),
+        _ => ("app-icon-dev.ico", "Wisp Dev"),
     };
     let icon = std::path::PathBuf::from(ICON_DIR).join(icon_filename);
     let icon_escaped = icon.to_string_lossy().replace('\\', "\\\\");
@@ -100,8 +100,8 @@ BEGIN
             VALUE "FileVersion", "{pkg_version}\0"
             VALUE "ProductName", "{product_name}\0"
             VALUE "ProductVersion", "{product_version}\0"
-            VALUE "CompanyName", "Zed Industries, Inc.\0"
-            VALUE "LegalCopyright", "Copyright 2022 - 2025 Zed Industries, Inc.\0"
+            VALUE "CompanyName", "Wisp\0"
+            VALUE "LegalCopyright", "Copyright Wisp contributors. Based on Zed, Copyright 2022 - 2025 Zed Industries, Inc.\0"
         END
     END
     BLOCK "VarFileInfo"
@@ -113,7 +113,7 @@ END
     );
 
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
-    let rc_path = out_dir.join("zed_resources.rc");
+    let rc_path = out_dir.join("wisp_resources.rc");
     std::fs::write(&rc_path, rc_content)?;
 
     if let Ok(toolkit_path) = std::env::var("ZED_RC_TOOLKIT_PATH") {

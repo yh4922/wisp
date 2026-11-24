@@ -226,6 +226,41 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
             name: "zed-keybind-context",
             ..Default::default()
         },
+        // Languages formerly provided by extensions. Only syntax support
+        // (highlights, brackets, indents, outline, injections) is built in;
+        // no language servers are wired up for them yet.
+        LanguageInfo {
+            name: "dockerfile",
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "html",
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "java",
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "nginx",
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "php",
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "sql",
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "toml",
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "vue",
+            ..Default::default()
+        },
     ];
 
     for registration in built_in_languages {
@@ -435,5 +470,115 @@ mod tests {
         assert_eq!(language_of(".env", cx), Some("Env".into()));
         assert_eq!(language_of(".envrc", cx), Some("Shell Script".into()));
         assert_eq!(language_of("deploy.sh", cx), Some("Shell Script".into()));
+    }
+
+    /// Every language directory in the `grammars` crate, including the ones
+    /// that replaced removed extensions.
+    const BUILT_IN_LANGUAGE_DIRS: &[&str] = &[
+        "bash",
+        "c",
+        "cpp",
+        "css",
+        "diff",
+        "dockerfile",
+        "env",
+        "gitcommit",
+        "go",
+        "gomod",
+        "gowork",
+        "html",
+        "java",
+        "javascript",
+        "jsdoc",
+        "json",
+        "jsonc",
+        "markdown",
+        "markdown-inline",
+        "nginx",
+        "php",
+        "python",
+        "regex",
+        "rust",
+        "sql",
+        "toml",
+        "tsx",
+        "typescript",
+        "vue",
+        "yaml",
+        "zed-keybind-context",
+    ];
+
+    #[test]
+    fn test_built_in_language_queries_compile() {
+        let native_grammars: collections::HashMap<&str, tree_sitter::Language> =
+            grammars::native_grammars().into_iter().collect();
+
+        let mut failures = Vec::new();
+        for &name in BUILT_IN_LANGUAGE_DIRS {
+            let config = grammars::load_config(name);
+            let Some(grammar_name) = config.grammar.clone() else {
+                failures.push(format!("{name}: config.toml has no grammar"));
+                continue;
+            };
+            let Some(grammar) = native_grammars.get(grammar_name.as_ref()) else {
+                failures.push(format!("{name}: grammar {grammar_name:?} is not registered"));
+                continue;
+            };
+            if let Err(error) = language::Language::new(config, Some(grammar.clone()))
+                .with_queries(grammars::load_queries(name))
+            {
+                failures.push(format!("{name}: {error:#}"));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "built-in language queries failed to compile:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[gpui::test]
+    fn test_former_extension_languages_match_paths(cx: &mut App) {
+        let settings_store = SettingsStore::test(cx);
+        cx.set_global(settings_store);
+
+        let registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
+        registry.add(crate::language("html", tree_sitter_html::LANGUAGE.into()));
+        registry.add(crate::language("vue", tree_sitter_vue_next::LANGUAGE.into()));
+        registry.add(crate::language("java", tree_sitter_java::LANGUAGE.into()));
+        registry.add(crate::language("php", tree_sitter_php::LANGUAGE_PHP.into()));
+        registry.add(crate::language(
+            "dockerfile",
+            tree_sitter_containerfile::LANGUAGE.into(),
+        ));
+        registry.add(crate::language("sql", tree_sitter_sequel::LANGUAGE.into()));
+        registry.add(crate::language("toml", tree_sitter_toml_ng::LANGUAGE.into()));
+        registry.add(crate::language("nginx", tree_sitter_nginx::LANGUAGE.into()));
+
+        let language_of = |path: &str, cx: &App| {
+            let file: Arc<dyn File> = Arc::new(TestFile {
+                path: Arc::from(rel_path(path)),
+                root_name: "zed".into(),
+                local_root: None,
+            });
+
+            registry
+                .language_for_file(&file, None, cx)
+                .and_then(|id| registry.language_name_for_id(id))
+        };
+
+        assert_eq!(language_of("index.html", cx), Some("HTML".into()));
+        assert_eq!(language_of("legacy.htm", cx), Some("HTML".into()));
+        assert_eq!(language_of("App.vue", cx), Some("Vue.js".into()));
+        assert_eq!(language_of("Main.java", cx), Some("Java".into()));
+        assert_eq!(language_of("index.php", cx), Some("PHP".into()));
+        assert_eq!(language_of("Dockerfile", cx), Some("Dockerfile".into()));
+        assert_eq!(language_of("Containerfile", cx), Some("Dockerfile".into()));
+        assert_eq!(language_of("app.dockerfile", cx), Some("Dockerfile".into()));
+        assert_eq!(language_of("query.sql", cx), Some("SQL".into()));
+        assert_eq!(language_of("Cargo.toml", cx), Some("TOML".into()));
+        assert_eq!(language_of("nginx.conf", cx), Some("Nginx".into()));
+        assert_eq!(language_of("site.nginx", cx), Some("Nginx".into()));
     }
 }

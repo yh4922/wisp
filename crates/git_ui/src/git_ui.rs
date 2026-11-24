@@ -62,7 +62,6 @@ pub mod text_diff_view;
 pub mod unstaged_diff;
 
 pub use blame_ui::GitBlameStatus;
-pub use conflict_view::MergeConflictIndicator;
 
 pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
@@ -1038,7 +1037,7 @@ mod remote_button {
     ) -> SplitButton {
         split_button(
             id,
-            "Fetch",
+            i18n::t("Fetch"),
             0,
             0,
             Some(IconName::ArrowCircle),
@@ -1050,7 +1049,7 @@ mod remote_button {
             },
             move |_window, cx| {
                 git_action_tooltip(
-                    "Fetch updates from remote",
+                    i18n::t("Fetch updates from remote"),
                     &git::Fetch,
                     "git fetch",
                     keybinding_target.clone(),
@@ -1069,7 +1068,7 @@ mod remote_button {
     ) -> SplitButton {
         split_button(
             id,
-            "Push",
+            i18n::t("Push"),
             ahead as usize,
             0,
             None,
@@ -1081,7 +1080,7 @@ mod remote_button {
             },
             move |_window, cx| {
                 git_action_tooltip(
-                    "Push committed changes to remote",
+                    i18n::t("Push committed changes to remote"),
                     &git::Push,
                     "git push",
                     keybinding_target.clone(),
@@ -1101,7 +1100,7 @@ mod remote_button {
     ) -> SplitButton {
         split_button(
             id,
-            "Pull",
+            i18n::t("Pull"),
             ahead as usize,
             behind as usize,
             None,
@@ -1113,7 +1112,7 @@ mod remote_button {
             },
             move |_window, cx| {
                 git_action_tooltip(
-                    "Pull",
+                    i18n::t("Pull"),
                     &git::Pull,
                     "git pull",
                     keybinding_target.clone(),
@@ -1131,7 +1130,7 @@ mod remote_button {
     ) -> SplitButton {
         split_button(
             id,
-            "Publish",
+            i18n::t("Publish"),
             0,
             0,
             Some(IconName::ExpandUp),
@@ -1143,7 +1142,7 @@ mod remote_button {
             },
             move |_window, cx| {
                 git_action_tooltip(
-                    "Publish branch to remote",
+                    i18n::t("Publish branch to remote"),
                     &git::Push,
                     "git push --set-upstream",
                     keybinding_target.clone(),
@@ -1161,7 +1160,7 @@ mod remote_button {
     ) -> SplitButton {
         split_button(
             id,
-            "Republish",
+            i18n::t("Republish"),
             0,
             0,
             Some(IconName::ExpandUp),
@@ -1173,7 +1172,7 @@ mod remote_button {
             },
             move |_window, cx| {
                 git_action_tooltip(
-                    "Re-publish branch to remote",
+                    i18n::t("Re-publish branch to remote"),
                     &git::Push,
                     "git push --set-upstream",
                     keybinding_target.clone(),
@@ -1185,9 +1184,9 @@ mod remote_button {
 
     fn in_progress_tooltip(operation: RemoteOperationKind) -> &'static str {
         match operation {
-            RemoteOperationKind::Fetch => "Fetch in Progress…",
-            RemoteOperationKind::Pull => "Pull in Progress…",
-            RemoteOperationKind::Push => "Push in Progress…",
+            RemoteOperationKind::Fetch => i18n::t("Fetch in Progress…"),
+            RemoteOperationKind::Pull => i18n::t("Pull in Progress…"),
+            RemoteOperationKind::Push => i18n::t("Push in Progress…"),
         }
     }
 
@@ -1227,14 +1226,14 @@ mod remote_button {
                         .when_some(keybinding_target.clone(), |el, keybinding_target| {
                             el.context(keybinding_target)
                         })
-                        .action("Fetch", git::Fetch.boxed_clone())
-                        .action("Fetch From", git::FetchFrom.boxed_clone())
-                        .action("Pull", git::Pull.boxed_clone())
-                        .action("Pull (Rebase)", git::PullRebase.boxed_clone())
+                        .action(i18n::t("Fetch"), git::Fetch.boxed_clone())
+                        .action(i18n::t("Fetch From"), git::FetchFrom.boxed_clone())
+                        .action(i18n::t("Pull"), git::Pull.boxed_clone())
+                        .action(i18n::t("Pull (Rebase)"), git::PullRebase.boxed_clone())
                         .separator()
-                        .action("Push", git::Push.boxed_clone())
-                        .action("Push To", git::PushTo.boxed_clone())
-                        .action("Force Push", git::ForcePush.boxed_clone())
+                        .action(i18n::t("Push"), git::Push.boxed_clone())
+                        .action(i18n::t("Push To"), git::PushTo.boxed_clone())
+                        .action(i18n::t("Force Push"), git::ForcePush.boxed_clone())
                 }))
             })
             .anchor(Anchor::TopRight)

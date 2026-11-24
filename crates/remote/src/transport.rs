@@ -484,7 +484,7 @@ async fn build_remote_server_from_source(
         .join("remote_server")
         .join(&triple)
         .join("debug")
-        .join("remote-server")
+        .join("wisp-remote-server")
         .with_extension(if platform.os.is_windows() { "exe" } else { "" });
 
     let path = if !build_remote_server.contains("nocompress") {

@@ -1,8 +1,9 @@
+mod server_download;
+
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use askpass::EncryptedPassword;
-use auto_update::AutoUpdater;
 use futures::{FutureExt as _, channel::oneshot, select};
 use gpui::{
     AnyWindowHandle, App, AsyncApp, DismissEvent, Entity, EventEmitter, Focusable, FontFeatures,
@@ -112,14 +113,15 @@ impl RemoteConnectionPrompt {
     }
 
     pub fn set_status(&mut self, status: Option<String>, cx: &mut Context<Self>) {
-        self.status_message = status.map(|s| s.into());
+        // Wisp: status texts come from the transport layer as English keys.
+        self.status_message = status.map(|s| i18n::t_dynamic(&s).into());
         cx.notify();
     }
 
     pub fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((_, tx)) = self.prompt.take() {
             self.prompt_cancellation_task.take();
-            self.status_message = Some("Connecting".into());
+            self.status_message = Some(i18n::t("Connecting").into());
 
             let pw = self.editor.text(cx);
             if let Ok(secure) = EncryptedPassword::try_from(pw.as_ref()) {
@@ -203,7 +205,7 @@ impl Render for RemoteConnectionPrompt {
                                     .color(Color::Muted),
                             )
                             .child(
-                                Label::new("Caps lock is on.")
+                                Label::new(i18n::t("Caps lock is on."))
                                     .size(LabelSize::Small)
                                     .color(Color::Muted),
                             ),
@@ -403,7 +405,7 @@ impl Render for RemoteConnectionModal {
                         .inset(true)
                         .spacing(ui::ListItemSpacing::Sparse)
                         .start_slot(Icon::new(IconName::Close).color(Color::Muted))
-                        .child(Label::new("Cancel"))
+                        .child(Label::new(i18n::t("Cancel")))
                         .end_slot(
                             KeyBinding::for_action_in(&menu::Cancel, &self.focus_handle(cx), cx)
                                 .size(rems_from_px(12_f32)),
@@ -438,11 +440,17 @@ impl ModalView for RemoteConnectionModal {
     }
 }
 
+/// Wisp: if ssh asks for a password again within this window after the known password
+/// was answered automatically, the known password is treated as wrong and the prompt is
+/// shown to the user instead (ssh retries within seconds; reconnects happen much later).
+const KNOWN_PASSWORD_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct RemoteClientDelegate {
     window: AnyWindowHandle,
     ui: WeakEntity<RemoteConnectionPrompt>,
     known_password: Option<EncryptedPassword>,
+    last_known_password_answer: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl RemoteClientDelegate {
@@ -455,7 +463,27 @@ impl RemoteClientDelegate {
             window,
             ui,
             known_password,
+            last_known_password_answer: Arc::default(),
         }
+    }
+
+    /// Returns the known (saved) password for this prompt, unless the prompt is a yes/no
+    /// question (e.g. host key confirmation) or the known password was just rejected.
+    fn take_known_password(&self, prompt: &str) -> Option<EncryptedPassword> {
+        let password = self.known_password.clone()?;
+        if prompt.contains("yes/no") {
+            return None;
+        }
+        let mut last_answer = self.last_known_password_answer.lock().ok()?;
+        let now = std::time::Instant::now();
+        if last_answer
+            .is_some_and(|answered_at| now.duration_since(answered_at) < KNOWN_PASSWORD_RETRY_WINDOW)
+        {
+            log::info!("saved SSH password was rejected, asking the user instead");
+            return None;
+        }
+        *last_answer = Some(now);
+        Some(password)
     }
 }
 
@@ -467,8 +495,7 @@ impl remote::RemoteClientDelegate for RemoteClientDelegate {
         cancellation: oneshot::Receiver<()>,
         cx: &mut AsyncApp,
     ) {
-        let mut known_password = self.known_password.clone();
-        if let Some(password) = known_password.take() {
+        if let Some(password) = self.take_known_password(&prompt) {
             tx.send(password).ok();
         } else {
             self.window
@@ -494,46 +521,27 @@ impl remote::RemoteClientDelegate for RemoteClientDelegate {
     ) -> Task<anyhow::Result<PathBuf>> {
         let this = self.clone();
         cx.spawn(async move |cx| {
-            AutoUpdater::download_remote_server_release(
+            server_download::download_remote_server_release(
+                platform,
                 release_channel,
-                version.clone(),
-                platform.os.as_str(),
-                platform.arch.as_str(),
+                version,
                 move |status, cx| this.set_status(Some(status), cx),
                 cx,
             )
             .await
-            .with_context(|| {
-                format!(
-                    "Downloading remote server binary (version: {}, os: {}, arch: {})",
-                    version
-                        .as_ref()
-                        .map(|v| format!("{}", v))
-                        .unwrap_or("unknown".to_string()),
-                    platform.os,
-                    platform.arch,
-                )
-            })
         })
     }
 
     fn get_download_url(
         &self,
         platform: RemotePlatform,
-        release_channel: ReleaseChannel,
+        _release_channel: ReleaseChannel,
         version: Option<Version>,
         cx: &mut AsyncApp,
     ) -> Task<Result<Option<String>>> {
-        cx.spawn(async move |cx| {
-            AutoUpdater::get_remote_server_release_url(
-                release_channel,
-                version,
-                platform.os.as_str(),
-                platform.arch.as_str(),
-                cx,
-            )
-            .await
-        })
+        Task::ready(server_download::get_remote_server_release_url(
+            platform, version, cx,
+        ))
     }
 }
 
@@ -633,7 +641,7 @@ pub fn connect_reusing_pool(
 /// Delegate for remote connections that reuse an existing pooled
 /// connection. Password prompts are not expected (the SSH transport
 /// is already established), but server binary downloads are supported
-/// via [`AutoUpdater`].
+/// from GitHub Releases.
 struct BackgroundRemoteClientDelegate;
 
 impl remote::RemoteClientDelegate for BackgroundRemoteClientDelegate {
@@ -660,46 +668,27 @@ impl remote::RemoteClientDelegate for BackgroundRemoteClientDelegate {
         cx: &mut AsyncApp,
     ) -> Task<anyhow::Result<PathBuf>> {
         cx.spawn(async move |cx| {
-            AutoUpdater::download_remote_server_release(
+            server_download::download_remote_server_release(
+                platform,
                 release_channel,
-                version.clone(),
-                platform.os.as_str(),
-                platform.arch.as_str(),
+                version,
                 |_status, _cx| {},
                 cx,
             )
             .await
-            .with_context(|| {
-                format!(
-                    "Downloading remote server binary (version: {}, os: {}, arch: {})",
-                    version
-                        .as_ref()
-                        .map(|v| format!("{v}"))
-                        .unwrap_or("unknown".to_string()),
-                    platform.os,
-                    platform.arch,
-                )
-            })
         })
     }
 
     fn get_download_url(
         &self,
         platform: RemotePlatform,
-        release_channel: ReleaseChannel,
+        _release_channel: ReleaseChannel,
         version: Option<Version>,
         cx: &mut AsyncApp,
     ) -> Task<Result<Option<String>>> {
-        cx.spawn(async move |cx| {
-            AutoUpdater::get_remote_server_release_url(
-                release_channel,
-                version,
-                platform.os.as_str(),
-                platform.arch.as_str(),
-                cx,
-            )
-            .await
-        })
+        Task::ready(server_download::get_remote_server_release_url(
+            platform, version, cx,
+        ))
     }
 }
 
@@ -721,11 +710,11 @@ pub fn connect(
     let (tx, mut rx) = oneshot::channel();
     ui.update(cx, |ui, _cx| ui.set_cancellation_tx(tx));
 
-    let delegate = Arc::new(RemoteClientDelegate {
+    let delegate = Arc::new(RemoteClientDelegate::new(
         window,
-        ui: ui.downgrade(),
+        ui.downgrade(),
         known_password,
-    });
+    ));
 
     cx.spawn(async move |cx| {
         let connection = remote::connect(connection_options, delegate.clone(), cx);
@@ -739,7 +728,6 @@ pub fn connect(
     })
 }
 
-use anyhow::Context as _;
 
 #[cfg(test)]
 mod tests {

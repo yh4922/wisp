@@ -1423,7 +1423,7 @@ enum WindowOpenState {
     Windowed,
 }
 
-const WINDOW_CLASS_NAME: PCWSTR = w!("Zed::Window");
+const WINDOW_CLASS_NAME: PCWSTR = w!("Wisp::Window");
 
 fn register_window_class(icon_handle: HICON) {
     static ONCE: Once = Once::new();
@@ -1574,6 +1574,21 @@ fn calculate_client_rect(
     }
 }
 
+/// Shrinks `bounds` to fit within `area` and moves it so it lies fully inside `area`.
+fn fit_bounds_into(bounds: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
+    if area.size.width <= px(0.) || area.size.height <= px(0.) {
+        return bounds;
+    }
+    let size = bounds.size.min(&area.size);
+    let max_x = area.origin.x + area.size.width - size.width;
+    let max_y = area.origin.y + area.size.height - size.height;
+    let origin = point(
+        bounds.origin.x.max(area.origin.x).min(max_x),
+        bounds.origin.y.max(area.origin.y).min(max_y),
+    );
+    Bounds::new(origin, size)
+}
+
 fn retrieve_window_placement(
     hwnd: HWND,
     display: WindowsDisplay,
@@ -1591,6 +1606,9 @@ fn retrieve_window_placement(
     } else {
         display.default_bounds()
     };
+    // Keep the window inside the work area so it never extends under the taskbar
+    // (restored bounds may have been saved on a larger screen or before this fix).
+    let bounds = fit_bounds_into(bounds, display.visible_bounds());
     // `bounds` is expressed in logical pixels for `display`, so it must be converted
     // to device pixels using that display's own scale factor. The window's current
     // scale factor can't be used here: `CreateWindowExW` was called with

@@ -751,16 +751,10 @@ impl settings::Settings for ThemeSettings {
             buffer_line_height: buffer_line_height_from_settings(
                 content.buffer_line_height.unwrap(),
             ),
-            agent_ui_font_family: content
-                .agent_ui_font_family
-                .as_ref()
-                .map(|font| font.0.clone().into()),
-            agent_ui_font_size: content.agent_ui_font_size.map(|s| s.into_gpui()),
-            agent_buffer_font_family: content
-                .agent_buffer_font_family
-                .as_ref()
-                .map(|font| font.0.clone().into()),
-            agent_buffer_font_size: content.agent_buffer_font_size.map(|s| s.into_gpui()),
+            agent_ui_font_family: None,
+            agent_ui_font_size: None,
+            agent_buffer_font_family: None,
+            agent_buffer_font_size: None,
             git_commit_buffer_font_size: content.git_commit_buffer_font_size.map(|s| s.into_gpui()),
             markdown_preview_font_family: markdown_preview
                 .and_then(|preview| preview.font_family.as_ref())

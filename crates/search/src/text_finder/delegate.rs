@@ -735,7 +735,7 @@ impl PickerDelegate for Delegate {
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        "Search all files…".into()
+        i18n::t("Search all files…").into()
     }
 
     fn searchbar_trailer(
@@ -767,7 +767,9 @@ impl PickerDelegate for Delegate {
             )
             .icon_size(IconSize::Small)
             .toggle_state(active.contains(options))
-            .tooltip(move |_window, cx| Tooltip::for_action_in(label, action, &focus_handle, cx))
+            .tooltip(move |_window, cx| {
+                Tooltip::for_action_in(i18n::t(label), action, &focus_handle, cx)
+            })
             .on_click(move |_, window, cx| {
                 picker.update(cx, |picker, cx| {
                     toggle_search_option(picker, options, window, cx);

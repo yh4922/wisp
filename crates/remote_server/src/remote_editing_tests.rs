@@ -2,15 +2,9 @@
 /// The tests in this file assume that server_cx is running on Windows too.
 /// We neead to find a way to test Windows-Non-Windows interactions.
 use crate::headless_project::HeadlessProject;
-use agent::{
-    AgentTool, NativeAgent, NativeAgentConnection, ReadFileTool, ReadFileToolInput, SkillTool,
-    SkillToolInput, SkillToolOutput, Templates, ThreadStore, ToolCallEventStream, ToolInput,
-    skill_body_resolver_for_project, skills_resolver_for_project,
-};
 use client::{Client, UserStore};
 use clock::FakeSystemClock;
 use collections::{HashMap, HashSet};
-use language_model::{LanguageModelRegistry, LanguageModelToolResultContent};
 use languages::rust_lang;
 
 use editor::{
@@ -18,7 +12,6 @@ use editor::{
     actions::{ConfirmCodeAction, ToggleCodeActions},
     code_context_menus::CodeContextMenu,
 };
-use extension::ExtensionHostProxy;
 use fs::{FakeFs, Fs};
 use futures::FutureExt as _;
 use git::{
@@ -40,14 +33,8 @@ use lsp::{
     LanguageServerId, LanguageServerName,
 };
 use node_runtime::NodeRuntime;
-#[cfg(not(windows))]
-use project::{
-    AgentId,
-    context_server_store::{ContextServerStatus, ServerStatusChangedEvent},
-};
 use project::{
     CompletionSource, LanguageServerLogType, ProgressToken, Project, ProjectPath,
-    agent_server_store::AgentServerCommand,
     buffer_store::BufferStoreEvent,
     image_store,
     lsp_store::log_store::{
@@ -57,8 +44,6 @@ use project::{
     worktree_store::WorktreeStoreEvent,
 };
 use remote::{ConnectionState, RemoteClient, RemoteClientEvent};
-#[cfg(not(windows))]
-use remote::{MOCK_STDIO_FRAME_HEX, command::RemoteCommand};
 use rpc::{ErrorCode, ErrorExt as _, proto};
 use serde_json::json;
 use settings::{
@@ -78,7 +63,6 @@ use std::{
 use unindent::Unindent as _;
 use util::{
     path,
-    path_list::PathList,
     paths::{PathMatcher, PathStyle},
     rel_path::rel_path,
 };
@@ -500,107 +484,6 @@ async fn test_remote_buffer_path_swap(cx: &mut TestAppContext, server_cx: &mut T
             });
         }
     }
-}
-
-#[gpui::test]
-async fn test_remote_telemetry_event_forwarding(
-    cx: &mut TestAppContext,
-    server_cx: &mut TestAppContext,
-) {
-    // This mirrors `init_test`, but retains the server-side session so the test
-    // can drive a forwarded telemetry event over the proto channel (as
-    // `init_telemetry_forwarding` does on a real remote server).
-    let server_fs = FakeFs::new(server_cx.executor());
-    server_fs
-        .insert_tree(
-            path!("/code"),
-            json!({ "project1": { "README.md": "# project 1" } }),
-        )
-        .await;
-
-    cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
-    server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
-    init_logger();
-
-    let (opts, server_session, _) = RemoteClient::fake_server(cx, server_cx);
-    let http_client = Arc::new(BlockedHttpClient);
-    let node_runtime = NodeRuntime::unavailable();
-    let languages = Arc::new(LanguageRegistry::new(cx.executor()));
-    let proxy = Arc::new(ExtensionHostProxy::new());
-    server_cx.update(HeadlessProject::init);
-    let headless = server_cx.new(|cx| {
-        HeadlessProject::new(
-            crate::HeadlessAppState {
-                session: server_session.clone(),
-                fs: server_fs.clone(),
-                http_client,
-                node_runtime,
-                languages,
-                extension_host_proxy: proxy,
-                startup_time: std::time::Instant::now(),
-            },
-            false,
-            cx,
-        )
-    });
-
-    let ssh = RemoteClient::connect_mock(opts, cx).await;
-    let project = build_project(ssh, cx);
-    project
-        .update(cx, {
-            let headless = headless.clone();
-            |_, cx| cx.on_release(|_, _| drop(headless))
-        })
-        .detach();
-
-    // The remote server forwards a bare `FlexibleEvent` as JSON; mirror that
-    // here by sending the proto message the forwarding task would send.
-    let event_json = json!({
-        "event_type": "fs_watcher_poll",
-        "event_properties": { "path": "/code/project1" },
-    })
-    .to_string();
-    server_session
-        .send(proto::TelemetryEvent {
-            project_id: proto::REMOTE_SERVER_PROJECT_ID,
-            event_json,
-        })
-        .unwrap();
-    cx.executor().run_until_parked();
-
-    let events = project.read_with(cx, |project, _| {
-        project.client().telemetry().queued_events()
-    });
-    assert_eq!(
-        events.len(),
-        1,
-        "the forwarded event should be reported once"
-    );
-    let event = &events[0];
-    assert_eq!(event.event_type, "fs_watcher_poll");
-    // The event's original properties survive the round-trip.
-    assert_eq!(
-        event.event_properties.get("path"),
-        Some(&serde_json::Value::String("/code/project1".to_string()))
-    );
-    // The client stamps the remote host metadata it learned at connection time.
-    // The mock connection reports a Linux/x86_64 host over a "mock" connection.
-    assert_eq!(
-        event.event_properties.get("remote"),
-        Some(&serde_json::Value::Bool(true))
-    );
-    assert_eq!(
-        event.event_properties.get("remote_connection_type"),
-        Some(&serde_json::Value::String("mock".to_string()))
-    );
-    assert_eq!(
-        event.event_properties.get("remote_os_name"),
-        Some(&serde_json::Value::String("Linux".to_string()))
-    );
-    assert_eq!(
-        event.event_properties.get("remote_architecture"),
-        Some(&serde_json::Value::String("x86_64".to_string()))
-    );
 }
 
 async fn do_search_and_assert(
@@ -4999,461 +4882,6 @@ async fn test_remote_git_branches(cx: &mut TestAppContext, server_cx: &mut TestA
 }
 
 #[gpui::test]
-async fn test_remote_agent_fs_tool_calls(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
-    let fs = FakeFs::new(server_cx.executor());
-    fs.insert_tree(
-        path!("/project"),
-        json!({
-            "a.txt": "A",
-            "b.txt": "B",
-        }),
-    )
-    .await;
-
-    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
-    project
-        .update(cx, |project, cx| {
-            project.find_or_create_worktree(path!("/project"), true, cx)
-        })
-        .await
-        .unwrap();
-
-    let action_log = cx.new(|_| action_log::ActionLog::new(project.clone()));
-
-    let input = ReadFileToolInput {
-        path: "project/b.txt".into(),
-        start_line: None,
-        end_line: None,
-    };
-    let read_tool = Arc::new(ReadFileTool::new(project, action_log, true));
-    let (event_stream, _) = ToolCallEventStream::test();
-
-    let exists_result = cx.update(|cx| {
-        read_tool
-            .clone()
-            .run(ToolInput::resolved(input), event_stream.clone(), cx)
-    });
-    let output = exists_result.await.unwrap();
-    assert_eq!(
-        output,
-        LanguageModelToolResultContent::Text("     1\tB".into())
-    );
-
-    let input = ReadFileToolInput {
-        path: "project/c.txt".into(),
-        start_line: None,
-        end_line: None,
-    };
-    let does_not_exist_result =
-        cx.update(|cx| read_tool.run(ToolInput::resolved(input), event_stream, cx));
-    does_not_exist_result.await.unwrap_err();
-}
-
-#[gpui::test]
-async fn test_adding_remote_skill(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
-    use acp_thread::AgentConnection as _;
-
-    let fs = FakeFs::new(server_cx.executor());
-    fs.insert_tree(
-        path!("/project"),
-        json!({
-            ".agents": {
-                "skills": {
-                    "test-skill": {
-                        "SKILL.md": "---\nname: test-skill\ndescription: test description\n---\ntest body"
-                    }
-                }
-            }
-        }),
-    )
-    .await;
-
-    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
-    cx.update(|cx| {
-        LanguageModelRegistry::test(cx);
-    });
-    let (_worktree, _rel_path) = project
-        .update(cx, |project, cx| {
-            project.find_or_create_worktree(path!("/project"), true, cx)
-        })
-        .await
-        .unwrap();
-    cx.run_until_parked();
-    let thread_store = cx.new(|cx| ThreadStore::new(cx));
-    let agent = cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
-    let connection = Rc::new(NativeAgentConnection(agent.clone()));
-    let _acp_thread = cx
-        .update(|cx| {
-            connection.clone().new_session(
-                project.clone(),
-                PathList::new(&[Path::new("/project")]),
-                cx,
-            )
-        })
-        .await
-        .unwrap();
-    cx.run_until_parked();
-
-    let skill_tool = Arc::new(SkillTool::with_body_resolver(
-        skills_resolver_for_project(agent.downgrade(), project.entity_id()),
-        skill_body_resolver_for_project(project.clone(), fs.clone()),
-    ));
-    let (event_stream, mut event_stream_rx) = ToolCallEventStream::test();
-
-    let input = SkillToolInput {
-        name: "test-skill".into(),
-    };
-    let task = cx.update(|cx| {
-        skill_tool
-            .clone()
-            .run(ToolInput::resolved(input), event_stream.clone(), cx)
-    });
-
-    // The project-local skill is not a built-in, so the tool requests
-    // authorization. Approve it so the tool can proceed.
-    let authorization = event_stream_rx.expect_authorization().await;
-    authorization
-        .response
-        .send(acp_thread::SelectedPermissionOutcome::new(
-            agent_client_protocol::v2::schema::PermissionOptionId::new("allow"),
-            agent_client_protocol::v2::schema::PermissionOptionKind::AllowOnce,
-        ))
-        .unwrap();
-
-    let output = task.await.unwrap();
-    cx.run_until_parked();
-    let expected = format!(
-        concat!(
-            "<skill_content name=\"test-skill\">\n",
-            "<source>project-local</source>\n",
-            "<worktree>project</worktree>\n",
-            "<directory>{}</directory>\n",
-            "Relative paths in this skill resolve against <directory>.\n",
-            "\n",
-            "test body\n",
-            "</skill_content>\n",
-        ),
-        path!("/project/.agents/skills/test-skill"),
-    );
-    assert_eq!(output, SkillToolOutput::Found { rendered: expected });
-
-    fs.create_dir(Path::new(path!("/project/.agents/skills/test-2")))
-        .await
-        .unwrap();
-    fs.insert_file(
-        path!("/project/.agents/skills/test-2/SKILL.md"),
-        "---\nname: test-2\ndescription: test description\n---\ntest body"
-            .as_bytes()
-            .into(),
-    )
-    .await;
-
-    cx.run_until_parked();
-    cx.update(|cx| connection.refresh_skills_for_project(project, cx));
-    cx.run_until_parked();
-
-    let input2 = SkillToolInput {
-        name: "test-2".into(),
-    };
-    let task = cx.update(|cx| {
-        skill_tool
-            .clone()
-            .run(ToolInput::resolved(input2), event_stream.clone(), cx)
-    });
-
-    let authorization = event_stream_rx.expect_authorization().await;
-    authorization
-        .response
-        .send(acp_thread::SelectedPermissionOutcome::new(
-            agent_client_protocol::v2::schema::PermissionOptionId::new("allow"),
-            agent_client_protocol::v2::schema::PermissionOptionKind::AllowOnce,
-        ))
-        .unwrap();
-
-    let output = task.await.unwrap();
-    let expected2 = format!(
-        concat!(
-            "<skill_content name=\"test-2\">\n",
-            "<source>project-local</source>\n",
-            "<worktree>project</worktree>\n",
-            "<directory>{}</directory>\n",
-            "Relative paths in this skill resolve against <directory>.\n",
-            "\n",
-            "test body\n",
-            "</skill_content>\n",
-        ),
-        path!("/project/.agents/skills/test-2"),
-    );
-    assert_eq!(
-        output,
-        SkillToolOutput::Found {
-            rendered: expected2
-        }
-    );
-}
-
-#[gpui::test]
-async fn test_remote_external_agent_server(
-    cx: &mut TestAppContext,
-    server_cx: &mut TestAppContext,
-) {
-    let fs = FakeFs::new(server_cx.executor());
-    fs.insert_tree(path!("/project"), json!({})).await;
-
-    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
-    project
-        .update(cx, |project, cx| {
-            project.find_or_create_worktree(path!("/project"), true, cx)
-        })
-        .await
-        .unwrap();
-    let names = project.update(cx, |project, cx| {
-        project
-            .agent_server_store()
-            .read(cx)
-            .external_agents()
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>()
-    });
-    pretty_assertions::assert_eq!(names, Vec::<String>::new());
-    server_cx.update_global::<SettingsStore, _>(|settings_store, cx| {
-        settings_store
-            .set_server_settings(
-                &json!({
-                    "agent_servers": {
-                        "foo": {
-                            "type": "custom",
-                            "command": "foo-cli",
-                            "args": ["--flag"],
-                            "env": {
-                                "VAR": "val"
-                            }
-                        }
-                    }
-                })
-                .to_string(),
-                cx,
-            )
-            .unwrap();
-    });
-    server_cx.run_until_parked();
-    cx.run_until_parked();
-    let names = project.update(cx, |project, cx| {
-        project
-            .agent_server_store()
-            .read(cx)
-            .external_agents()
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>()
-    });
-    pretty_assertions::assert_eq!(names, ["foo"]);
-    let command = project
-        .update(cx, |project, cx| {
-            project.agent_server_store().update(cx, |store, cx| {
-                store
-                    .get_external_agent(&"foo".into())
-                    .unwrap()
-                    .get_command(
-                        vec![],
-                        HashMap::from_iter([("OTHER_VAR".into(), "other-val".into())]),
-                        &mut cx.to_async(),
-                    )
-            })
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        command,
-        AgentServerCommand {
-            path: "foo-cli".into(),
-            args: vec!["--flag".into()],
-            env: Some(HashMap::from_iter([
-                ("NO_BROWSER".into(), "1".into()),
-                ("VAR".into(), "val".into()),
-                ("OTHER_VAR".into(), "other-val".into())
-            ]))
-        }
-    );
-}
-
-#[cfg(not(windows))]
-#[gpui::test]
-async fn test_remote_external_agent_receives_env_over_stdin(
-    cx: &mut TestAppContext,
-    server_cx: &mut TestAppContext,
-) {
-    let fs = FakeFs::new(server_cx.executor());
-    fs.insert_tree(path!("/project"), json!({})).await;
-    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
-    project
-        .update(cx, |project, cx| {
-            project.find_or_create_worktree(path!("/project"), true, cx)
-        })
-        .await
-        .unwrap();
-    cx.executor().allow_parking();
-
-    let output_dir = tempfile::tempdir().unwrap();
-    let output_path = output_dir.path().join("launch");
-    let args = stdio_launch_args(
-        &output_path,
-        r#"{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}"#,
-    );
-    server_cx.update_global(|settings_store: &mut SettingsStore, cx| {
-        settings_store
-            .set_server_settings(
-                &json!({
-                    "agent_servers": {
-                        "foo": {
-                            "type": "custom",
-                            "command": "/bin/sh",
-                            "args": args,
-                            "env": { "AGENT_TOKEN": "agent-secret-sentinel" }
-                        }
-                    }
-                })
-                .to_string(),
-                cx,
-            )
-            .unwrap();
-    });
-    server_cx.run_until_parked();
-    cx.run_until_parked();
-
-    let agent_server_store =
-        project.read_with(cx, |project, _| project.agent_server_store().clone());
-    let command = agent_server_store
-        .update(cx, |store, cx| {
-            store
-                .get_external_agent(&"foo".into())
-                .unwrap()
-                .get_command(vec![], HashMap::default(), &mut cx.to_async())
-        })
-        .await
-        .unwrap();
-    let connection = agent_servers::AcpConnection::stdio(
-        AgentId::new("foo"),
-        project.clone(),
-        command,
-        agent_server_store.downgrade(),
-        None,
-        HashMap::default(),
-        &mut cx.to_async(),
-    )
-    .await
-    .unwrap();
-
-    let (launched, first_message) = read_stdio_launch(&output_path);
-    assert_eq!(launched.program, "/bin/sh");
-    assert_eq!(launched.args, args);
-    assert_eq!(
-        launched.env,
-        HashMap::from_iter([
-            (String::from("NO_BROWSER"), String::from("1")),
-            (
-                String::from("AGENT_TOKEN"),
-                String::from("agent-secret-sentinel")
-            ),
-        ])
-    );
-    assert_eq!(launched.working_dir.as_deref(), Some(path!("/project")));
-    assert_eq!(first_message["method"], "initialize");
-    drop(connection);
-}
-
-#[cfg(not(windows))]
-#[gpui::test]
-async fn test_remote_context_server_receives_env_over_stdin(
-    cx: &mut TestAppContext,
-    server_cx: &mut TestAppContext,
-) {
-    let fs = FakeFs::new(server_cx.executor());
-    fs.insert_tree(path!("/project"), json!({})).await;
-    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
-    project
-        .update(cx, |project, cx| {
-            project.find_or_create_worktree(path!("/project"), true, cx)
-        })
-        .await
-        .unwrap();
-    cx.executor().allow_parking();
-
-    let store = project.read_with(cx, |project, _| project.context_server_store());
-    let (status_tx, mut status_rx) = futures::channel::mpsc::unbounded();
-    let _subscription = cx.update(|cx| {
-        cx.subscribe(&store, move |_, event: &ServerStatusChangedEvent, _| {
-            status_tx.unbounded_send(event.status.clone()).ok();
-        })
-    });
-
-    let output_dir = tempfile::tempdir().unwrap();
-    let output_path = output_dir.path().join("launch");
-    let args = stdio_launch_args(
-        &output_path,
-        r#"{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test-server","version":"1.0.0"}}"#,
-    );
-    let settings = json!({
-        "context_servers": {
-            "mcp": {
-                "source": "custom",
-                "remote": true,
-                "command": "/bin/sh",
-                "args": args,
-                "env": { "MCP_TOKEN": "mcp-secret-sentinel" }
-            }
-        }
-    })
-    .to_string();
-    server_cx.update_global(|settings_store: &mut SettingsStore, cx| {
-        settings_store.set_server_settings(&settings, cx).unwrap();
-    });
-    server_cx.run_until_parked();
-    cx.run_until_parked();
-    cx.update_global(|settings_store: &mut SettingsStore, cx| {
-        settings_store.set_user_settings(&settings, cx).unwrap();
-    });
-
-    let statuses = async {
-        let mut statuses = Vec::new();
-        while let Some(status) = status_rx.next().await {
-            let starting = status == ContextServerStatus::Starting;
-            statuses.push(status);
-            if !starting {
-                break;
-            }
-        }
-        statuses
-    }
-    .fuse();
-    let timeout = cx
-        .background_executor
-        .timer(std::time::Duration::from_secs(30))
-        .fuse();
-    futures::pin_mut!(statuses, timeout);
-    let statuses = futures::select! {
-        statuses = statuses => statuses,
-        _ = timeout => panic!("timed out waiting for the context server status"),
-    };
-    assert_eq!(
-        statuses,
-        [ContextServerStatus::Starting, ContextServerStatus::Running]
-    );
-
-    let (launched, first_message) = read_stdio_launch(&output_path);
-    assert_eq!(launched.program, "/bin/sh");
-    assert_eq!(launched.args, args);
-    assert_eq!(
-        launched.env,
-        HashMap::from_iter([(
-            String::from("MCP_TOKEN"),
-            String::from("mcp-secret-sentinel")
-        )])
-    );
-    assert_eq!(launched.working_dir.as_deref(), Some(path!("/project")));
-    assert_eq!(first_message["method"], "initialize");
-}
-
-#[gpui::test]
 async fn test_remote_apply_code_action_skips_unadvertised_command(
     cx: &mut TestAppContext,
     server_cx: &mut TestAppContext,
@@ -6501,7 +5929,6 @@ pub async fn init_test(
     let http_client = Arc::new(BlockedHttpClient);
     let node_runtime = NodeRuntime::unavailable();
     let languages = Arc::new(LanguageRegistry::new(cx.executor()));
-    let proxy = Arc::new(ExtensionHostProxy::new());
     server_cx.update(HeadlessProject::init);
     let headless = server_cx.new(|cx| {
         HeadlessProject::new(
@@ -6511,7 +5938,6 @@ pub async fn init_test(
                 http_client,
                 node_runtime,
                 languages,
-                extension_host_proxy: proxy,
                 startup_time: std::time::Instant::now(),
             },
             false,
@@ -6532,39 +5958,6 @@ pub async fn init_test(
 
 fn init_logger() {
     zlog::init_test();
-}
-
-#[cfg(not(windows))]
-fn stdio_launch_args(output_path: &Path, initialize_result: &str) -> Vec<String> {
-    let script = format!(
-        r#"printf '%s\n' "${MOCK_STDIO_FRAME_HEX}" > "$1"
-IFS= read -r line
-printf '%s\n' "$line" >> "$1"
-id=$(printf '%s' "$line" | sed -nE 's/^\{{"jsonrpc":"2.0","id":("[^"]*"|[0-9]+),.*/\1/p')
-printf '{{"jsonrpc":"2.0","id":%s,"result":%s}}\n' "$id" "$2"
-exec cat >/dev/null"#
-    );
-    vec![
-        String::from("-c"),
-        script,
-        String::from("sh"),
-        output_path.display().to_string(),
-        String::from(initialize_result),
-    ]
-}
-
-#[cfg(not(windows))]
-fn read_stdio_launch(output_path: &Path) -> (RemoteCommand, serde_json::Value) {
-    let output = std::fs::read_to_string(output_path).unwrap();
-    let (frame_hex, first_line) = output.trim_end().split_once('\n').unwrap();
-    let frame = (0..frame_hex.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&frame_hex[index..index + 2], 16).unwrap())
-        .collect::<Vec<_>>();
-    let mut frame = &frame[..];
-    let command = RemoteCommand::read(&mut frame).unwrap();
-    assert_eq!(frame, b"");
-    (command, serde_json::from_str(first_line).unwrap())
 }
 
 fn build_project(ssh: Entity<RemoteClient>, cx: &mut TestAppContext) -> Entity<Project> {

@@ -5710,7 +5710,6 @@ fn collect_search_matches(picker: &Picker<FileFinderDelegate>) -> SearchEntries 
             }
             Match::Absolute(path) => search_entries.absolute.push(path.clone()),
             Match::CreateNew(_) => {}
-            Match::Channel { .. } => {}
         }
     }
     search_entries
@@ -5935,7 +5934,6 @@ fn assert_match_at_position(
         Match::Search(path_match) => path_match.0.path.file_name(),
         Match::Absolute(path) => path.file_name().and_then(|name| name.to_str()),
         Match::CreateNew(project_path) => project_path.path.file_name(),
-        Match::Channel { channel_name, .. } => Some(channel_name.as_str()),
     }
     .unwrap();
     assert_eq!(match_file_name, expected_file_name);

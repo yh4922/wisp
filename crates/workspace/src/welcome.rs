@@ -1,26 +1,24 @@
 use crate::{
-    NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation,
-    ToggleWorkspaceSidebar, Workspace, WorkspaceSettings,
+    NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation, Workspace,
+    WorkspaceSettings,
     item::{Item, ItemEvent},
     persistence::WorkspaceDb,
 };
-use agent_settings::AgentSettings;
 use git::Clone as GitClone;
+use gpui::WeakEntity;
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Render, Styled, Task, TaskExt, Window, actions,
+    Action, AnyView, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Global,
+    InteractiveElement, ParentElement, Render, Styled, Task, TaskExt, Window, actions,
 };
-use gpui::{WeakEntity, linear_color_stop, linear_gradient};
 use menu::{SelectNext, SelectPrevious};
+use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{DefaultOpenBehavior, Settings};
-use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
+use ui::{ButtonLike, Divider, DividerColor, KeyBinding, prelude::*};
 use util::ResultExt;
-use zed_actions::{
-    Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
-};
+use zed_actions::{OpenKeymap, OpenOnboarding, OpenSettings, command_palette};
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = welcome)]
@@ -32,10 +30,21 @@ pub struct OpenRecentProject {
 actions!(
     zed,
     [
-        /// Show the Zed welcome screen
+        /// Show the Wisp welcome screen
         ShowWelcome
     ]
 );
+
+/// 启动页的附加区块，由上层 crate 注入（Wisp 中由 `workspace_panel` 注册「工作区」区块），
+/// 以避免 `workspace` 反向依赖它。每个启动页创建时调用一次，返回的视图自行订阅数据变化。
+///
+/// 注册后，启动页不再显示自带的「最近的项目」区块（由注入的区块负责显示最近打开），避免重复。
+#[derive(Clone)]
+pub struct WelcomeSectionProvider(
+    pub Arc<dyn Fn(WeakEntity<Workspace>, &mut Window, &mut App) -> AnyView>,
+);
+
+impl Global for WelcomeSectionProvider {}
 
 #[derive(IntoElement)]
 struct SectionHeader {
@@ -153,7 +162,7 @@ impl SectionEntry {
     fn render(&self, button_index: usize, focus: &FocusHandle) -> Option<impl IntoElement> {
         self.visibility_guard.is_visible().then(|| {
             SectionButton::new(
-                self.title,
+                i18n::t(self.title),
                 self.icon,
                 self.action,
                 button_index,
@@ -163,7 +172,7 @@ impl SectionEntry {
     }
 }
 
-const CONTENT: (Section<4>, Section<3>) = (
+const CONTENT: (Section<4>, Section<2>) = (
     Section {
         title: "Get Started",
         entries: [
@@ -208,15 +217,6 @@ const CONTENT: (Section<4>, Section<3>) = (
                 action: &OpenKeymap,
                 visibility_guard: SectionVisibility::Always,
             },
-            SectionEntry {
-                icon: IconName::Blocks,
-                title: "Explore Extensions",
-                action: &Extensions {
-                    category_filter: None,
-                    id: None,
-                },
-                visibility_guard: SectionVisibility::Always,
-            },
         ],
     },
 );
@@ -230,7 +230,7 @@ impl<const COLS: usize> Section<COLS> {
     fn render(self, index_offset: usize, focus: &FocusHandle) -> impl IntoElement {
         v_flex()
             .min_w_full()
-            .child(SectionHeader::new(self.title))
+            .child(SectionHeader::new(i18n::t(self.title)))
             .children(
                 self.entries
                     .iter()
@@ -245,6 +245,7 @@ pub struct WelcomePage {
     focus_handle: FocusHandle,
     fallback_to_recent_projects: bool,
     recent_workspaces: Option<Vec<RecentWorkspace>>,
+    extra_section: Option<AnyView>,
 }
 
 impl WelcomePage {
@@ -258,7 +259,12 @@ impl WelcomePage {
         cx.on_focus(&focus_handle, window, |_, _, cx| cx.notify())
             .detach();
 
-        if fallback_to_recent_projects {
+        let extra_section = cx
+            .try_global::<WelcomeSectionProvider>()
+            .map(|provider| provider.0.clone())
+            .map(|provider| provider(workspace.clone(), window, cx));
+
+        if fallback_to_recent_projects && extra_section.is_none() {
             let fs = workspace
                 .upgrade()
                 .map(|ws| ws.read(cx).app_state().fs.clone());
@@ -285,6 +291,7 @@ impl WelcomePage {
             focus_handle,
             fallback_to_recent_projects,
             recent_workspaces: None,
+            extra_section,
         }
     }
 
@@ -329,62 +336,13 @@ impl WelcomePage {
         }
     }
 
-    fn render_agent_card(&self, tab_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let focus = self.focus_handle.clone();
-        let color = cx.theme().colors();
-
-        let description = "Run multiple threads at once, mix and match any ACP-compatible agent, and keep work conflict-free with worktrees.";
-
-        v_flex()
-            .w_full()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(color.border_variant)
-            .bg(linear_gradient(
-                360.,
-                linear_color_stop(color.panel_background, 1.0),
-                linear_color_stop(color.editor_background, 0.45),
-            ))
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .child(
-                        Icon::new(IconName::ZedAssistant)
-                            .color(Color::Muted)
-                            .size(IconSize::Small),
-                    )
-                    .child(Label::new("Collaborate with Agents")),
-            )
-            .child(
-                Label::new(description)
-                    .size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .mb_2(),
-            )
-            .child(
-                Button::new("open-agent", "Open Agent Panel")
-                    .full_width()
-                    .tab_index(tab_index as isize)
-                    .style(ButtonStyle::Outlined)
-                    .key_binding(
-                        KeyBinding::for_action_in(&ToggleFocus, &self.focus_handle, cx)
-                            .size(rems_from_px(12_f32)),
-                    )
-                    .on_click(move |_, window, cx| {
-                        focus.dispatch_action(&ToggleWorkspaceSidebar, window, cx);
-                        focus.dispatch_action(&ToggleFocus, window, cx);
-                    }),
-            )
-    }
-
     fn render_recent_project_section(
         &self,
         recent_projects: Vec<impl IntoElement>,
     ) -> impl IntoElement {
         v_flex()
             .w_full()
-            .child(SectionHeader::new("Recent Projects"))
+            .child(SectionHeader::new(i18n::t("Recent Projects")))
             .children(recent_projects)
     }
 
@@ -418,9 +376,7 @@ impl Render for WelcomePage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (first_section, second_section) = CONTENT;
         let first_section_entries = first_section.entries.len();
-        let mut next_tab_index = first_section_entries + second_section.entries.len();
-
-        let ai_enabled = AgentSettings::get_global(cx).enabled(cx);
+        let next_tab_index = first_section_entries + second_section.entries.len();
 
         let recent_projects = self
             .recent_workspaces
@@ -441,7 +397,17 @@ impl Render for WelcomePage {
 
         let showing_recent_projects =
             self.fallback_to_recent_projects && !recent_projects.is_empty();
-        let second_section = if showing_recent_projects {
+        let second_section = if let Some(extra_section) = self.extra_section.clone() {
+            // 注入的区块（工作区列表）自带「最近打开」；非启动页模式下仍保留「配置」区块。
+            v_flex()
+                .w_full()
+                .gap_6()
+                .child(extra_section)
+                .when(!self.fallback_to_recent_projects, |this| {
+                    this.child(second_section.render(first_section_entries, &self.focus_handle))
+                })
+                .into_any_element()
+        } else if showing_recent_projects {
             self.render_recent_project_section(recent_projects)
                 .into_any_element()
         } else {
@@ -451,9 +417,9 @@ impl Render for WelcomePage {
         };
 
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zed"
+            i18n::t("Welcome back to Wisp")
         } else {
-            "Welcome to Zed"
+            i18n::t("Welcome to Wisp")
         };
 
         h_flex()
@@ -480,10 +446,13 @@ impl Render for WelcomePage {
                             .justify_center()
                             .mb_4()
                             .gap_4()
-                            .child(Vector::square(VectorName::ZedLogo, rems_from_px(45_f32)))
+                            .child(
+                                Icon::new(IconName::Wisp)
+                                    .size(IconSize::Custom(rems_from_px(45_f32))),
+                            )
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
+                                    Label::new(i18n::t("The editor for what's next"))
                                         .size(LabelSize::Small)
                                         .color(Color::Muted)
                                         .italic(),
@@ -492,15 +461,10 @@ impl Render for WelcomePage {
                     )
                     .child(first_section.render(Default::default(), &self.focus_handle))
                     .child(second_section)
-                    .when(ai_enabled && !showing_recent_projects, |this| {
-                        let agent_tab_index = next_tab_index;
-                        next_tab_index += 1;
-                        this.child(self.render_agent_card(agent_tab_index, cx))
-                    })
                     .when(!self.fallback_to_recent_projects, |this| {
                         this.child(
                             v_flex().gap_4().child(Divider::horizontal()).child(
-                                Button::new("welcome-exit", "Return to Onboarding")
+                                Button::new("welcome-exit", i18n::t("Return to Onboarding"))
                                     .tab_index(next_tab_index as isize)
                                     .full_width()
                                     .label_size(LabelSize::XSmall)
@@ -526,7 +490,7 @@ impl Item for WelcomePage {
     type Event = ItemEvent;
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        "Welcome".into()
+        i18n::t("Welcome").into()
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {

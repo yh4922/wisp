@@ -1,10 +1,7 @@
-use crate::{
-    ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar,
-    sidebar_side_context_menu,
-};
+use crate::{ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar};
 use gpui::{
-    Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
+    AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement, ParentElement,
+    Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
 };
 use settings::{SettingsContent, update_settings_file};
 use std::{any::TypeId, sync::Arc};
@@ -127,7 +124,7 @@ impl Render for StatusBar {
             // steps through them, and arrow keys move between them once focus is
             // inside.
             .role(Role::Toolbar)
-            .aria_label("Status bar")
+            .aria_label(i18n::t("Status bar"))
             .tab_group()
             .on_key_down(
                 cx.listener(|status_bar, event: &gpui::KeyDownEvent, window, cx| {
@@ -238,44 +235,35 @@ impl StatusBar {
         let has_notifications = sidebar.has_notifications;
         let indicator_border = cx.theme().colors().status_bar_background;
 
-        let toggle = sidebar_side_context_menu("sidebar-status-toggle-menu", cx)
-            .anchor(if on_right {
-                Anchor::BottomRight
+        let toggle = IconButton::new(
+            "toggle-workspace-sidebar",
+            if on_right {
+                IconName::ThreadsSidebarRightClosed
             } else {
-                Anchor::BottomLeft
-            })
-            .attach(if on_right {
-                Anchor::TopRight
-            } else {
-                Anchor::TopLeft
-            })
-            .trigger(move |_is_active, _window, _cx| {
-                IconButton::new(
-                    "toggle-workspace-sidebar",
-                    if on_right {
-                        IconName::ThreadsSidebarRightClosed
-                    } else {
-                        IconName::ThreadsSidebarLeftClosed
-                    },
-                )
-                .icon_size(IconSize::Small)
-                .tab_index(0isize)
-                .aria_label("Open threads sidebar")
-                .when(has_notifications, |this| {
-                    this.indicator(Indicator::dot().color(Color::Accent))
-                        .indicator_border_color(Some(indicator_border))
-                })
-                .tooltip(move |_, cx| {
-                    Tooltip::for_action("Open Threads Sidebar", &ToggleWorkspaceSidebar, cx)
-                })
-                .on_click(move |_, window, cx| {
-                    if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
-                        multi_workspace.update(cx, |multi_workspace, cx| {
-                            multi_workspace.toggle_sidebar(window, cx);
-                        });
-                    }
-                })
-            });
+                IconName::ThreadsSidebarLeftClosed
+            },
+        )
+        .icon_size(IconSize::Small)
+        .tab_index(0isize)
+        .aria_label(i18n::t("Open workspace sidebar"))
+        .when(has_notifications, |this| {
+            this.indicator(Indicator::dot().color(Color::Accent))
+                .indicator_border_color(Some(indicator_border))
+        })
+        .tooltip(move |_, cx| {
+            Tooltip::for_action(
+                i18n::t("Open Workspace Sidebar"),
+                &ToggleWorkspaceSidebar,
+                cx,
+            )
+        })
+        .on_click(move |_, window, cx| {
+            if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
+                multi_workspace.update(cx, |multi_workspace, cx| {
+                    multi_workspace.toggle_sidebar(window, cx);
+                });
+            }
+        });
 
         h_flex()
             .gap_0p5()
@@ -315,7 +303,7 @@ fn render_hideable_item(
 /// Appends a "Hide Button" entry aligned with surrounding toggleable entries.
 pub fn add_hide_button_entry(menu: ContextMenu, hide: HideStatusItem) -> ContextMenu {
     menu.toggleable_entry(
-        "Hide Button",
+        i18n::t("Hide Button"),
         false,
         IconPosition::Start,
         None,

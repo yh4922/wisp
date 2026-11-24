@@ -40,7 +40,7 @@ use crate::{
     actions::{DisableBreakpoint, EditLogBreakpoint, EnableBreakpoint, ToggleBreakpoint},
     display_map::Companion,
 };
-use zed_actions::{OpenSettingsAt, assistant::InlineAssist};
+use zed_actions::OpenSettingsAt;
 
 pub(crate) fn patches_for_lhs_range(
     rhs_snapshot: &MultiBufferSnapshot,
@@ -1110,19 +1110,6 @@ impl SplittableEditor {
             } else {
                 cx.propagate();
             }
-        } else {
-            cx.propagate();
-        }
-    }
-
-    fn intercept_inline_assist(
-        &mut self,
-        _: &InlineAssist,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.lhs.is_some() {
-            cx.stop_propagation();
         } else {
             cx.propagate();
         }
@@ -2322,7 +2309,6 @@ impl Render for SplittableEditor {
             .on_action(cx.listener(Self::intercept_enable_breakpoint))
             .on_action(cx.listener(Self::intercept_disable_breakpoint))
             .on_action(cx.listener(Self::intercept_edit_log_breakpoint))
-            .on_action(cx.listener(Self::intercept_inline_assist))
             .capture_action(cx.listener(Self::toggle_soft_wrap))
             .size_full()
             .child(inner)

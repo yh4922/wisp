@@ -112,6 +112,7 @@ fn split_paths_and_urls(paths_or_urls: &[String]) -> (Vec<String>, Vec<String>) 
     let mut urls = vec![];
     for path in paths_or_urls {
         if path.starts_with("zed://")
+            || path.starts_with("wisp://")
             || path.starts_with("http://")
             || path.starts_with("https://")
             || path.starts_with("file://")

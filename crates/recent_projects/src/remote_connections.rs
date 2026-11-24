@@ -311,7 +311,7 @@ pub async fn open_remote_project(
                         window.prompt(
                             PromptLevel::Critical,
                             match connection_options {
-                                RemoteConnectionOptions::Ssh(_) => "Failed to connect over SSH",
+                                RemoteConnectionOptions::Ssh(_) => i18n::t("Failed to connect over SSH"),
                                 RemoteConnectionOptions::Wsl(_) => "Failed to connect to WSL",
                                 RemoteConnectionOptions::Docker(_) => {
                                     "Failed to connect to Dev Container"
@@ -322,7 +322,7 @@ pub async fn open_remote_project(
                                 }
                             },
                             Some(&format!("{e:#}")),
-                            &["Retry", "Cancel"],
+                            &[i18n::t("Retry"), i18n::t("Cancel")],
                             cx,
                         )
                     })?
@@ -372,7 +372,7 @@ pub async fn open_remote_project(
                         window.prompt(
                             PromptLevel::Critical,
                             match connection_options {
-                                RemoteConnectionOptions::Ssh(_) => "Failed to connect over SSH",
+                                RemoteConnectionOptions::Ssh(_) => i18n::t("Failed to connect over SSH"),
                                 RemoteConnectionOptions::Wsl(_) => "Failed to connect to WSL",
                                 RemoteConnectionOptions::Docker(_) => {
                                     "Failed to connect to Dev Container"
@@ -383,7 +383,7 @@ pub async fn open_remote_project(
                                 }
                             },
                             Some(&format!("{e:#}")),
-                            &["Retry", "Cancel"],
+                            &[i18n::t("Retry"), i18n::t("Cancel")],
                             cx,
                         )
                     })?
@@ -496,7 +496,6 @@ async fn path_exists(connection: &Arc<dyn RemoteConnection>, path: &Path) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension::ExtensionHostProxy;
     use fs::FakeFs;
     use gpui::{AppContext, Entity, TestAppContext};
     use http_client::BlockedHttpClient;
@@ -543,7 +542,6 @@ mod tests {
         let http_client = Arc::new(BlockedHttpClient);
         let node_runtime = NodeRuntime::unavailable();
         let languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
-        let proxy = Arc::new(ExtensionHostProxy::new());
 
         let _headless = server_cx.new(|cx| {
             HeadlessProject::new(
@@ -553,7 +551,6 @@ mod tests {
                     http_client,
                     node_runtime,
                     languages,
-                    extension_host_proxy: proxy,
                     startup_time: std::time::Instant::now(),
                 },
                 false,
@@ -621,7 +618,6 @@ mod tests {
         let http_client = Arc::new(BlockedHttpClient);
         let node_runtime = NodeRuntime::unavailable();
         let languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
-        let proxy = Arc::new(ExtensionHostProxy::new());
 
         let headless = server_cx.new(|cx| {
             HeadlessProject::new(
@@ -631,7 +627,6 @@ mod tests {
                     http_client,
                     node_runtime,
                     languages,
-                    extension_host_proxy: proxy,
                     startup_time: std::time::Instant::now(),
                 },
                 false,
@@ -866,7 +861,6 @@ mod tests {
         let http_client = Arc::new(BlockedHttpClient);
         let node_runtime = NodeRuntime::unavailable();
         let languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
-        let proxy = Arc::new(ExtensionHostProxy::new());
 
         let _headless = server_cx.new(|cx| {
             HeadlessProject::new(
@@ -876,7 +870,6 @@ mod tests {
                     http_client,
                     node_runtime,
                     languages,
-                    extension_host_proxy: proxy,
                     startup_time: std::time::Instant::now(),
                 },
                 false,
@@ -958,7 +951,6 @@ mod tests {
         let http_client = Arc::new(BlockedHttpClient);
         let node_runtime = NodeRuntime::unavailable();
         let languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
-        let proxy = Arc::new(ExtensionHostProxy::new());
 
         let _headless = server_cx.new(|cx| {
             HeadlessProject::new(
@@ -968,7 +960,6 @@ mod tests {
                     http_client: http_client.clone(),
                     node_runtime: node_runtime.clone(),
                     languages: languages.clone(),
-                    extension_host_proxy: proxy.clone(),
                     startup_time: std::time::Instant::now(),
                 },
                 false,
@@ -1029,7 +1020,6 @@ mod tests {
                     http_client,
                     node_runtime,
                     languages,
-                    extension_host_proxy: proxy,
                     startup_time: std::time::Instant::now(),
                 },
                 false,

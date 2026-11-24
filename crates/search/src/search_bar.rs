@@ -63,7 +63,7 @@ pub(super) fn render_local_action_button<T: 'static, A: Action>(
             handler(this, action, window, cx);
         }
     }))
-    .tooltip(move |_window, cx| Tooltip::for_action_in(tooltip, action, &focus_handle, cx))
+    .tooltip(move |_window, cx| Tooltip::for_action_in(i18n::t(tooltip), action, &focus_handle, cx))
     .when_some(button_state, |this, state| match state {
         ActionButtonState::Toggled => this.toggle_state(true),
         ActionButtonState::Disabled => this.disabled(true),
@@ -94,7 +94,7 @@ pub(crate) fn filter_search_results_input(
             .border_r_1()
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().text_accent.opacity(0.05))
-            .child(Label::new("Find in Results").color(Color::Muted)),
+            .child(Label::new(i18n::t("Find in Results")).color(Color::Muted)),
     )
 }
 

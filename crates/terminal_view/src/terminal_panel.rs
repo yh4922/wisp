@@ -38,7 +38,6 @@ use workspace::{
 };
 
 use anyhow::{Result, anyhow};
-use zed_actions::assistant::InlineAssist;
 
 const TERMINAL_PANEL_KEY: &str = "TerminalPanel";
 
@@ -85,7 +84,6 @@ pub struct TerminalPanel {
     restoring: bool,
     _restoration: Task<()>,
     deferred_tasks: HashMap<TaskId, Task<()>>,
-    assistant_enabled: bool,
     active: bool,
 }
 
@@ -105,18 +103,10 @@ impl TerminalPanel {
             restoring: false,
             _restoration: Task::ready(()),
             deferred_tasks: HashMap::default(),
-            assistant_enabled: false,
             active: false,
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
         terminal_panel
-    }
-
-    pub fn set_assistant_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.assistant_enabled = enabled;
-        for pane in self.center.panes() {
-            self.apply_tab_bar_buttons(pane, cx);
-        }
     }
 
     pub(crate) fn apply_tab_bar_buttons(
@@ -124,7 +114,6 @@ impl TerminalPanel {
         terminal_pane: &Entity<Pane>,
         cx: &mut Context<Self>,
     ) {
-        let assistant_enabled = self.assistant_enabled;
         terminal_pane.update(cx, |pane, cx| {
             pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
                 let split_context = pane
@@ -148,7 +137,7 @@ impl TerminalPanel {
                         PopoverMenu::new("terminal-tab-bar-popover-menu")
                             .trigger_with_tooltip(
                                 IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
-                                Tooltip::text("New…"),
+                                Tooltip::text(i18n::t("New…")),
                             )
                             .anchor(Anchor::TopRight)
                             .with_handle(pane.new_item_context_menu_handle.clone())
@@ -157,14 +146,14 @@ impl TerminalPanel {
                                 let menu = ContextMenu::build(window, cx, |menu, _, _| {
                                     menu.context(focus_handle.clone())
                                         .action(
-                                            "New Terminal",
+                                            i18n::t("New Terminal"),
                                             workspace::NewTerminal::default().boxed_clone(),
                                         )
                                         // We want the focus to go back to terminal panel once task modal is dismissed,
                                         // hence we focus that first. Otherwise, we'd end up without a focused element, as
                                         // context menu will be gone the moment we spawn the modal.
                                         .action(
-                                            "Spawn Task",
+                                            i18n::t("Spawn Task"),
                                             zed_actions::Spawn::modal().boxed_clone(),
                                         )
                                 });
@@ -172,17 +161,12 @@ impl TerminalPanel {
                                 Some(menu)
                             }),
                     )
-                    .when(assistant_enabled, |this| {
-                        this.when_some(split_context.clone(), |this, focus_handle| {
-                            this.child(InlineAssistTabBarButton { focus_handle })
-                        })
-                    })
                     .child(
                         PopoverMenu::new("terminal-pane-tab-bar-split")
                             .trigger_with_tooltip(
                                 IconButton::new("terminal-pane-split", IconName::Split)
                                     .icon_size(IconSize::Small),
-                                Tooltip::text("Split Pane"),
+                                Tooltip::text(i18n::t("Split Pane")),
                             )
                             .anchor(Anchor::TopRight)
                             .with_handle(pane.split_item_context_menu_handle.clone())
@@ -193,10 +177,22 @@ impl TerminalPanel {
                                             split_context.clone(),
                                             |menu, split_context| menu.context(split_context),
                                         )
-                                        .action("Split Right", SplitRight::default().boxed_clone())
-                                        .action("Split Left", SplitLeft::default().boxed_clone())
-                                        .action("Split Up", SplitUp::default().boxed_clone())
-                                        .action("Split Down", SplitDown::default().boxed_clone())
+                                        .action(
+                                            i18n::t("Split Right"),
+                                            SplitRight::default().boxed_clone(),
+                                        )
+                                        .action(
+                                            i18n::t("Split Left"),
+                                            SplitLeft::default().boxed_clone(),
+                                        )
+                                        .action(
+                                            i18n::t("Split Up"),
+                                            SplitUp::default().boxed_clone(),
+                                        )
+                                        .action(
+                                            i18n::t("Split Down"),
+                                            SplitDown::default().boxed_clone(),
+                                        )
                                     })
                                     .into()
                                 }
@@ -213,7 +209,7 @@ impl TerminalPanel {
                             }))
                             .tooltip(move |_window, cx| {
                                 Tooltip::for_action(
-                                    if zoomed { "Zoom Out" } else { "Zoom In" },
+                                    i18n::t(if zoomed { "Zoom Out" } else { "Zoom In" }),
                                     &ToggleZoom,
                                     cx,
                                 )
@@ -1202,10 +1198,6 @@ impl TerminalPanel {
         self.active_pane.read(cx).items_len() == 0 && self.pending_terminals_to_add == 0
     }
 
-    pub fn assistant_enabled(&self) -> bool {
-        self.assistant_enabled
-    }
-
     /// Returns all panes in the terminal panel.
     pub fn panes(&self) -> Vec<&Entity<Pane>> {
         self.center.panes()
@@ -1439,7 +1431,7 @@ impl Render for FailedToSpawnTerminal {
                     .items_center()
                     .justify_center()
                     .text_center()
-                    .child(Label::new("Failed to spawn terminal"))
+                    .child(Label::new(i18n::t("Failed to spawn terminal")))
                     .child(
                         Label::new(self.error.to_string())
                             .size(LabelSize::Small)
@@ -1448,7 +1440,7 @@ impl Render for FailedToSpawnTerminal {
                     )
                     .child(SplitButton::new(
                         ButtonLike::new("open-settings-ui")
-                            .child(Label::new("Edit Settings").size(LabelSize::Small))
+                            .child(Label::new(i18n::t("Edit Settings")).size(LabelSize::Small))
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(zed_actions::OpenSettings.boxed_clone(), cx);
                             }),
@@ -1514,7 +1506,6 @@ impl Render for TerminalPanel {
                         None,
                         &workspace::PaneRenderContext {
                             follower_states: &HashMap::default(),
-                            active_call: workspace.active_call(),
                             active_pane: &self.active_pane,
                             app_state: workspace.app_state(),
                             project: workspace.project(),
@@ -1797,7 +1788,7 @@ impl Panel for TerminalPanel {
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Terminal Panel")
+        Some(i18n::t("Terminal Panel"))
     }
 
     fn toggle_action(&self) -> Box<dyn gpui::Action> {
@@ -1850,35 +1841,13 @@ impl workspace::TerminalProvider for TerminalProvider {
     }
 }
 
-#[derive(IntoElement)]
-struct InlineAssistTabBarButton {
-    focus_handle: FocusHandle,
-}
-
-impl RenderOnce for InlineAssistTabBarButton {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let focus_handle = self.focus_handle;
-        IconButton::new("terminal_inline_assistant", IconName::ZedAssistant)
-            .icon_size(IconSize::Small)
-            .on_click({
-                let focus_handle = focus_handle.clone();
-                move |_, window, cx| {
-                    focus_handle.dispatch_action(&InlineAssist::default(), window, cx);
-                }
-            })
-            .tooltip(move |_window, cx| {
-                Tooltip::for_action_in("Inline Assist", &InlineAssist::default(), &focus_handle, cx)
-            })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::num::NonZero;
 
     use super::*;
     use crate::persistence::{SerializedPane, SerializedPaneGroup};
-    use gpui::{Modifiers, TestAppContext, UpdateGlobal as _, VisualTestContext};
+    use gpui::{TestAppContext, UpdateGlobal as _, VisualTestContext};
     use pretty_assertions::assert_eq;
     use project::FakeFs;
     use settings::SettingsStore;
@@ -2827,47 +2796,6 @@ mod tests {
                 "finishing restoration must not steal focus from an active modal"
             );
         });
-    }
-
-    #[gpui::test]
-    async fn test_inline_assist_tooltip_shows_keybinding_of_active_terminal(
-        cx: &mut TestAppContext,
-    ) {
-        cx.executor().allow_parking();
-        init_test(cx);
-
-        cx.update(|cx| {
-            cx.bind_keys([gpui::KeyBinding::new(
-                "ctrl-enter",
-                InlineAssist::default(),
-                Some("Terminal"),
-            )])
-        });
-
-        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
-        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
-
-        terminal_panel.update(cx, |panel, cx| panel.set_assistant_enabled(true, cx));
-        terminal_panel
-            .update_in(cx, |panel, window, cx| {
-                panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
-            })
-            .await
-            .unwrap();
-        cx.run_until_parked();
-
-        let button_bounds = cx
-            .debug_bounds("ICON-ZedAssistant")
-            .expect("inline assist button should be rendered in the terminal tab bar");
-        cx.simulate_mouse_move(button_bounds.center(), None, Modifiers::default());
-
-        cx.executor().advance_clock(Duration::from_millis(600));
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("KEY_BINDING-enter").is_some(),
-            "tooltip should show the InlineAssist keybinding resolved in the terminal's context"
-        );
     }
 
     // On Windows `echo` is a shell builtin rather than an executable, so spawning it directly fails.

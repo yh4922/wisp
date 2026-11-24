@@ -46,10 +46,10 @@ static ACTION_SCHEMA_CACHE: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::default()));
 
 // Runtime cache for dynamic schemas that depend on runtime state:
-// - "settings": depends on installed fonts, themes, languages, LSP adapters (extensions can add these)
+// - "settings": depends on installed fonts, themes, languages, LSP adapters
 // - "settings/lsp/*": depends on LSP adapter initialization options
-// - "debug_tasks": depends on DAP adapters (extensions can add these)
-// Cache is invalidated via notify_schema_changed() when extensions or DAP registry change.
+// - "debug_tasks": depends on DAP adapters
+// Debug task schemas are invalidated via notify_schema_changed() when the DAP registry changes.
 static DYNAMIC_SCHEMA_CACHE: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::default()));
 
@@ -65,20 +65,6 @@ pub fn init(cx: &mut App) {
         cx.global_mut::<SchemaStore>().lsp_stores.push(lsp_store);
     })
     .detach();
-
-    if let Some(extension_events) = extension::ExtensionEvents::try_global(cx) {
-        cx.subscribe(&extension_events, move |_, evt, cx| match evt {
-            extension::Event::ExtensionsInstalledChanged => {
-                cx.update_global::<SchemaStore, _>(|schema_store, cx| {
-                    schema_store.notify_schema_changed(ChangedSchemas::Settings, cx);
-                });
-            }
-            extension::Event::ExtensionUninstalled(_)
-            | extension::Event::ExtensionInstalled(_)
-            | extension::Event::ConfigureExtensionRequested(_) => {}
-        })
-        .detach();
-    }
 
     cx.observe_global::<dap::DapRegistry>(move |cx| {
         cx.update_global::<SchemaStore, _>(|schema_store, cx| {
@@ -96,24 +82,12 @@ pub struct SchemaStore {
 impl gpui::Global for SchemaStore {}
 
 enum ChangedSchemas {
-    Settings,
     DebugTasks,
 }
 
 impl SchemaStore {
     fn notify_schema_changed(&mut self, changed_schemas: ChangedSchemas, cx: &mut App) {
         let uris_to_invalidate = match changed_schemas {
-            ChangedSchemas::Settings => {
-                let settings_uri_prefix = &format!("{SCHEMA_URI_PREFIX}settings");
-                let project_settings_uri = &format!("{SCHEMA_URI_PREFIX}project_settings");
-                DYNAMIC_SCHEMA_CACHE
-                    .write()
-                    .extract_if(|uri, _| {
-                        uri == project_settings_uri || uri.starts_with(settings_uri_prefix)
-                    })
-                    .map(|(url, _)| url)
-                    .collect()
-            }
             ChangedSchemas::DebugTasks => DYNAMIC_SCHEMA_CACHE
                 .write()
                 .remove_entry(&format!("{SCHEMA_URI_PREFIX}debug_tasks"))

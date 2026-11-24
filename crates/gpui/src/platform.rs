@@ -690,7 +690,9 @@ pub trait PlatformDisplay: Debug {
 
     /// Get the default bounds for this display to place a window
     fn default_bounds(&self) -> Bounds<Pixels> {
-        let bounds = self.bounds();
+        // Use the visible bounds so the default window never extends under
+        // the taskbar/dock (e.g. a 1080px-tall screen with a Windows taskbar).
+        let bounds = self.visible_bounds();
         let center = bounds.center();
         let clipped_window_size = DEFAULT_WINDOW_SIZE.min(&bounds.size);
 
@@ -3027,12 +3029,38 @@ impl PromptButton {
     }
 }
 
+static PROMPT_LABEL_LOCALIZER: std::sync::OnceLock<fn(&str) -> Option<&'static str>> =
+    std::sync::OnceLock::new();
+
+/// Installs a function that translates prompt button labels (e.g. "OK", "Cancel") into the
+/// current UI language. Labels that are already translated are still recognized as OK/Cancel.
+pub fn set_prompt_label_localizer(localizer: fn(&str) -> Option<&'static str>) {
+    PROMPT_LABEL_LOCALIZER.set(localizer).ok();
+}
+
+fn localize_prompt_label(label: &str) -> Option<&'static str> {
+    PROMPT_LABEL_LOCALIZER
+        .get()
+        .and_then(|localizer| localizer(label))
+}
+
 impl From<&str> for PromptButton {
     fn from(value: &str) -> Self {
-        match value.to_lowercase().as_str() {
-            "ok" => PromptButton::Ok("OK".into()),
-            "cancel" => PromptButton::Cancel("Cancel".into()),
-            _ => PromptButton::Other(SharedString::from(value.to_owned())),
+        let is_label = |english: &str| {
+            value.eq_ignore_ascii_case(english) || localize_prompt_label(english) == Some(value)
+        };
+        let localized = |english: &'static str| -> SharedString {
+            localize_prompt_label(english).unwrap_or(english).into()
+        };
+        if is_label("OK") {
+            PromptButton::Ok(localized("OK"))
+        } else if is_label("Cancel") {
+            PromptButton::Cancel(localized("Cancel"))
+        } else {
+            match localize_prompt_label(value) {
+                Some(translated) => PromptButton::Other(translated.into()),
+                None => PromptButton::Other(SharedString::from(value.to_owned())),
+            }
         }
     }
 }

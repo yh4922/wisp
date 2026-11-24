@@ -996,7 +996,7 @@ impl Inner {
                     PromptLevel::Info,
                     &prompt.message,
                     prompt.detail,
-                    &[prompt.confirmation_label, "Cancel"],
+                    &[prompt.confirmation_label, i18n::t("Cancel")],
                     cx,
                 )
             })?

@@ -1027,7 +1027,7 @@ impl SshRemoteConnection {
             _ => version.to_string(),
         };
         let binary_name = format!(
-            "zed-remote-server-{}-{}{}",
+            "wisp-remote-server-{}-{}{}",
             release_channel.dev_name(),
             version_str,
             if self.ssh_platform.os.is_windows() {
@@ -1137,8 +1137,7 @@ impl SshRemoteConnection {
                 wanted_version.clone(),
                 cx,
             )
-            .await
-            .context("downloading server binary locally")?;
+            .await?; // Wisp：下载失败的错误信息已是面向用户的完整描述，不再包一层英文上下文。
         self.upload_local_server_binary(&src_path, &tmp_path_compressed, delegate, cx)
             .await
             .context("uploading server binary")?;
