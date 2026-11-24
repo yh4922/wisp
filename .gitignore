@@ -62,3 +62,9 @@ crates/docs_preprocessor/actions.json
 
 .local*
 .cache
+
+# Wisp 本地开发产物（截图、设计草稿、临时文件）
+/.tasks/shots/
+/.tasks/tb.diff
+/assets/branding/drafts/
+/script/render-svg.ps1
