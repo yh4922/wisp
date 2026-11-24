@@ -1,0 +1,69 @@
+name: Setup MSVC Spectre-mitigated libs
+description: >
+  The msvc_spectre_libs crate (pulled in by pet) panics in its build script when the
+  MSVC "Spectre-mitigated libs" component is missing. Install the component with the
+  Visual Studio installer; if that fails, create an empty lib\spectre\<arch> directory
+  so the build script passes (same idea as script/wisp-env.ps1). With the empty
+  directory the regular, non-Spectre CRT libraries are linked.
+inputs:
+  arch:
+    description: MSVC library architecture (x64 or arm64)
+    required: false
+    default: x64
+runs:
+  using: composite
+  steps:
+    - name: Install or fake Spectre-mitigated libs
+      shell: pwsh
+      env:
+        SPECTRE_ARCH: ${{ inputs.arch }}
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $installerDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
+        $vswhere = Join-Path $installerDir 'vswhere.exe'
+        $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'Visual Studio with MSVC tools not found' }
+        Write-Host "Visual Studio: $vs"
+
+        function Get-SpectreDir {
+          $verFile = Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+          $ver = (Get-Content $verFile -Raw).Trim()
+          return (Join-Path $vs "VC\Tools\MSVC\$ver\lib\spectre\$env:SPECTRE_ARCH")
+        }
+
+        $spectre = Get-SpectreDir
+        if (Test-Path (Join-Path $spectre '*.lib')) {
+          Write-Host "Spectre libs already installed: $spectre"
+          exit 0
+        }
+
+        # Option 1 (preferred): install the VS component.
+        $component = if ($env:SPECTRE_ARCH -eq 'arm64') {
+          'Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre'
+        } else {
+          'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre'
+        }
+        $setup = Join-Path $installerDir 'setup.exe'
+        if (-not (Test-Path $setup)) { $setup = Join-Path $installerDir 'vs_installer.exe' }
+        Write-Host "Installing $component via $setup"
+        try {
+          $p = Start-Process -FilePath $setup -Wait -PassThru -NoNewWindow -ArgumentList @(
+            'modify', '--installPath', "`"$vs`"", '--add', $component,
+            '--quiet', '--norestart', '--nocache'
+          )
+          Write-Host "VS installer exit code: $($p.ExitCode)"
+        } catch {
+          Write-Warning "VS installer failed to start: $($_.Exception.Message)"
+        }
+
+        $spectre = Get-SpectreDir
+        if (Test-Path (Join-Path $spectre '*.lib')) {
+          Write-Host "Spectre libs installed: $spectre"
+          exit 0
+        }
+
+        # Option 2 (fallback): fake an empty spectre directory so msvc_spectre_libs' build
+        # script finds it (it only checks that <cl.exe>\..\..\..\..\lib\spectre\<arch> exists).
+        Write-Warning "Spectre component unavailable; creating empty $spectre (non-Spectre CRT will be linked)."
+        New-Item -ItemType Directory -Force -Path $spectre | Out-Null
+        if (-not (Test-Path $spectre)) { throw "Failed to create $spectre" }

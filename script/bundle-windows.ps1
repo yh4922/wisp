@@ -1,415 +1,230 @@
+<#
+.SYNOPSIS
+    Package already-built Wisp release binaries into a Windows installer and a portable zip.
+
+.DESCRIPTION
+    Used both by .github/workflows/release.yml and for local packaging.
+    Compatible with Windows PowerShell 5.1 and PowerShell 7.
+
+    Inputs (from `cargo build -p zed -p cli --release`):
+        <TargetDir>\wisp.exe
+        <TargetDir>\cli.exe
+    Outputs (in <OutputDir>):
+        Wisp-<version>-<arch>-setup.exe      Inno Setup installer
+        Wisp-<version>-<arch>-portable.zip   portable build (top-level folder "Wisp\")
+
+    The script does NOT run cargo unless -Build is given.
+
+.EXAMPLE
+    .\script\bundle-windows.ps1
+.EXAMPLE
+    .\script\bundle-windows.ps1 -Build -SkipInstaller
+#>
 [CmdletBinding()]
 Param(
-    [Parameter()][Alias('i')][switch]$Install,
-    [Parameter()][Alias('h')][switch]$Help,
-    [Parameter()][Alias('a')][string]$Architecture,
-    [Parameter()][string]$Name
+    # Directory that contains wisp.exe and cli.exe. Defaults to $env:CARGO_TARGET_DIR\release or target\release.
+    [string]$TargetDir,
+    # Where the installer and zip are written. Defaults to target\dist.
+    [string]$OutputDir,
+    # Version string. Defaults to the version in crates\zed\Cargo.toml.
+    [string]$Version,
+    [ValidateSet('x86_64')]
+    [string]$Architecture = 'x86_64',
+    # Run `cargo build -p zed -p cli --release` first (local convenience).
+    [switch]$Build,
+    [switch]$SkipInstaller,
+    [switch]$SkipPortable
 )
 
-. "$PSScriptRoot/lib/workspace.ps1"
-
-# https://stackoverflow.com/questions/57949031/powershell-script-stops-if-program-fails-like-bash-set-o-errexit
 $ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$buildSuccess = $false
-$canCodeSign = $false
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
-$OSArchitecture = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
-    "X64" { "x86_64" }
-    "Arm64" { "aarch64" }
-    default { throw "Unsupported architecture" }
+function Invoke-Native {
+    param([string]$File, [string[]]$Arguments)
+    Write-Host ">> $File $($Arguments -join ' ')"
+    & $File @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "$File failed with exit code $LASTEXITCODE" }
 }
 
-$Architecture = if ($Architecture) {
-    $Architecture
-} else {
-    $OSArchitecture
+function Get-WispVersion {
+    $inPackage = $false
+    foreach ($line in Get-Content (Join-Path $Root 'crates\zed\Cargo.toml')) {
+        if ($line -match '^\[package\]') { $inPackage = $true; continue }
+        if ($line -match '^\[') { $inPackage = $false }
+        if ($inPackage -and $line -match '^version\s*=\s*"([^"]+)"') { return $Matches[1] }
+    }
+    throw 'Could not read version from crates\zed\Cargo.toml'
 }
 
-$CargoOutDir = "./target/$Architecture-pc-windows-msvc/release"
-
-function Get-VSArch {
-    param(
-        [string]$Arch
+function Find-Iscc {
+    $cmd = Get-Command iscc.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    # Prefer Inno Setup 6 (what wisp.iss is tested with); 7 is accepted as a fallback.
+    $candidates = @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
+        "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe"
     )
-
-    switch ($Arch) {
-        "x86_64" { "amd64" }
-        "aarch64" { "arm64" }
-    }
+    foreach ($c in $candidates) { if ($c -and (Test-Path $c)) { return $c } }
+    throw 'Inno Setup 6 (ISCC.exe) not found. Install it (e.g. `choco install innosetup` or `winget install JRSoftware.InnoSetup`).'
 }
 
-Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
-Pop-Location
-
-$target = "$Architecture-pc-windows-msvc"
-
-if ($Help) {
-    Write-Output "Usage: test.ps1 [-Install] [-Help]"
-    Write-Output "Build the installer for Windows.\n"
-    Write-Output "Options:"
-    Write-Output "  -Architecture, -a Which architecture to build (x86_64 or aarch64)"
-    Write-Output "  -Install, -i      Run the installer after building."
-    Write-Output "  -Help, -h         Show this help message."
-    exit 0
-}
-
-Push-Location -Path crates/zed
-$channel = Get-Content "RELEASE_CHANNEL"
-$env:ZED_RELEASE_CHANNEL = $channel
-$env:RELEASE_CHANNEL = $channel
-Pop-Location
-
-function CheckEnvironmentVariables {
-    if(-not $env:CI) {
-        return
-    }
-
-    $requiredVars = @('ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL')
-
-    foreach ($var in $requiredVars) {
-        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($var))) {
-            Write-Error "$var is not set"
-            exit 1
+# ConPTY: conpty.dll + OpenConsole.exe give the integrated terminal a newer console host.
+# Optional: if neither the download nor the copies placed by crates/zed/build.rs are
+# available, Wisp falls back to the system ConPTY.
+function Add-ConPty {
+    param([string]$Stage)
+    $url = 'https://github.com/microsoft/terminal/releases/download/v1.25.1912.0/Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg'
+    $tmp = Join-Path $Root 'target\wisp-bundle-cache'
+    $nupkg = Join-Path $tmp 'conpty.nupkg.zip'
+    $extract = Join-Path $tmp 'conpty'
+    New-Item -ItemType Directory -Force $tmp | Out-Null
+    try {
+        if (-not (Test-Path (Join-Path $extract 'runtimes'))) {
+            Invoke-WebRequest -Uri $url -OutFile $nupkg -UseBasicParsing
+            if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+            Expand-Archive -Path $nupkg -DestinationPath $extract -Force
         }
+        New-Item -ItemType Directory -Force (Join-Path $Stage 'x64'), (Join-Path $Stage 'arm64') | Out-Null
+        Copy-Item (Join-Path $extract 'runtimes\win-x64\native\conpty.dll') (Join-Path $Stage 'conpty.dll') -Force
+        Copy-Item (Join-Path $extract 'build\native\runtimes\x64\OpenConsole.exe') (Join-Path $Stage 'x64\OpenConsole.exe') -Force
+        Copy-Item (Join-Path $extract 'build\native\runtimes\arm64\OpenConsole.exe') (Join-Path $Stage 'arm64\OpenConsole.exe') -Force
+        return
+    } catch {
+        Write-Warning "ConPTY download failed ($($_.Exception.Message)); falling back to local copies."
     }
+    $dll = Join-Path $TargetDir 'conpty.dll'
+    if (Test-Path $dll) { Copy-Item $dll (Join-Path $Stage 'conpty.dll') -Force }
+    $oc = Join-Path $TargetDir 'OpenConsole.exe'
+    if (-not (Test-Path $oc)) { $oc = Join-Path $Root 'crates\zed\resources\windows\bin\x64\OpenConsole.exe' }
+    if (Test-Path $oc) {
+        New-Item -ItemType Directory -Force (Join-Path $Stage 'x64') | Out-Null
+        Copy-Item $oc (Join-Path $Stage 'x64\OpenConsole.exe') -Force
+    }
+}
 
-    # On PRs from forks the signing secrets are not populated,
-    # so skip code signing instead of failing, like bundle-mac does.
-    $signingVars = @(
-        'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
-        'ACCOUNT_NAME', 'CERT_PROFILE_NAME', 'ENDPOINT',
-        'FILE_DIGEST', 'TIMESTAMP_DIGEST', 'TIMESTAMP_SERVER'
+# AMD GPU Services: optional, loaded at runtime by gpui_windows if present.
+# Keep the version in sync with crates/gpui_windows/src/directx_renderer.rs.
+function Add-AmdAgs {
+    param([string]$Stage)
+    $tmp = Join-Path $Root 'target\wisp-bundle-cache'
+    $zip = Join-Path $tmp 'AGS_SDK_v6.3.0.zip'
+    $dll = Join-Path $tmp 'AGS_SDK-6.3.0\ags_lib\lib\amd_ags_x64.dll'
+    try {
+        if (-not (Test-Path $dll)) {
+            New-Item -ItemType Directory -Force $tmp | Out-Null
+            Invoke-WebRequest -Uri 'https://codeload.github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/zip/refs/tags/v6.3.0' -OutFile $zip -UseBasicParsing
+            Expand-Archive -Path $zip -DestinationPath $tmp -Force
+        }
+        Copy-Item $dll (Join-Path $Stage 'amd_ags_x64.dll') -Force
+    } catch {
+        Write-Warning "AMD AGS download failed ($($_.Exception.Message)); skipping amd_ags_x64.dll."
+    }
+}
+
+# ---------------------------------------------------------------------------
+
+if (-not $Version) { $Version = Get-WispVersion }
+if (-not $TargetDir) {
+    $cargoTarget = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
+    $TargetDir = Join-Path $cargoTarget 'release'
+}
+if (-not $OutputDir) { $OutputDir = Join-Path $Root 'target\dist' }
+New-Item -ItemType Directory -Force $OutputDir | Out-Null
+$OutputDir = (Resolve-Path $OutputDir).Path
+
+$channel = (Get-Content (Join-Path $Root 'crates\zed\RELEASE_CHANNEL') -Raw).Trim()
+if ($channel -ne 'stable') {
+    Write-Warning "crates\zed\RELEASE_CHANNEL is '$channel'; installer metadata (AppId, mutex, names) assumes 'stable'."
+}
+
+Write-Host "Wisp $Version ($channel, $Architecture)"
+Write-Host "  binaries: $TargetDir"
+Write-Host "  output:   $OutputDir"
+
+if ($Build) {
+    Push-Location $Root
+    try {
+        $env:ZED_BUNDLE = 'true'
+        $env:RELEASE_VERSION = $Version
+        Invoke-Native 'cargo' @('build', '--release', '-p', 'zed', '-p', 'cli')
+    } finally { Pop-Location }
+}
+
+$wispExe = Join-Path $TargetDir 'wisp.exe'
+$cliExe = Join-Path $TargetDir 'cli.exe'
+foreach ($f in @($wispExe, $cliExe)) {
+    if (-not (Test-Path $f)) { throw "Missing $f - build first: cargo build -p zed -p cli --release" }
+}
+
+# --- Stage ----------------------------------------------------------------
+$resources = Join-Path $Root 'crates\zed\resources\windows'
+$stage = Join-Path $Root "target\wisp-bundle\$Architecture"
+if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+New-Item -ItemType Directory -Force (Join-Path $stage 'bin') | Out-Null
+
+Copy-Item $wispExe (Join-Path $stage 'Wisp.exe') -Force
+Copy-Item $cliExe (Join-Path $stage 'bin\wisp.exe') -Force
+Copy-Item (Join-Path $resources 'wisp.sh') (Join-Path $stage 'bin\wisp') -Force
+Add-ConPty -Stage $stage
+Add-AmdAgs -Stage $stage
+
+# --- Portable zip -----------------------------------------------------------
+if (-not $SkipPortable) {
+    $zipPath = Join-Path $OutputDir "Wisp-$Version-$Architecture-portable.zip"
+    $zipRoot = Join-Path $Root "target\wisp-bundle\portable-$Architecture"
+    if (Test-Path $zipRoot) { Remove-Item $zipRoot -Recurse -Force }
+    $appDir = Join-Path $zipRoot 'Wisp'
+    New-Item -ItemType Directory -Force $appDir | Out-Null
+    Copy-Item (Join-Path $stage '*') $appDir -Recurse -Force
+    # Portable build keeps cargo's lower-case name.
+    Move-Item (Join-Path $appDir 'Wisp.exe') (Join-Path $appDir 'wisp.exe.tmp') -Force
+    Move-Item (Join-Path $appDir 'wisp.exe.tmp') (Join-Path $appDir 'wisp.exe') -Force
+    Copy-Item (Join-Path $Root 'LICENSE-GPL') $appDir -Force
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+    # Build the zip entry by entry: ZipFile.CreateFromDirectory on Windows PowerShell 5.1
+    # (.NET Framework) writes '\' separators, which break unzip tools outside Windows.
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $prefixLength = (Resolve-Path $zipRoot).Path.TrimEnd('\').Length + 1
+        foreach ($file in Get-ChildItem $zipRoot -Recurse -File) {
+            $entryName = $file.FullName.Substring($prefixLength).Replace('\', '/')
+            [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+        }
+    } finally {
+        $zip.Dispose()
+    }
+    Write-Host "Portable zip: $zipPath"
+}
+
+# --- Installer ----------------------------------------------------------------
+if (-not $SkipInstaller) {
+    # The .iss reads icons and messages relative to ResourcesDir.
+    Copy-Item (Join-Path $resources 'wisp.iss') $stage -Force
+    Copy-Item (Join-Path $resources 'app-icon.ico') $stage -Force
+    Copy-Item (Join-Path $resources 'messages') $stage -Recurse -Force
+
+    $iscc = Find-Iscc
+    $isccArgs = @(
+        '/Q',
+        "/DVersion=$Version",
+        "/DArch=$Architecture",
+        "/DAppSetupName=Wisp-$Version-$Architecture-setup",
+        "/DResourcesDir=$stage",
+        "/DSourceDir=$Root",
+        "/DOutputDir=$OutputDir",
+        (Join-Path $stage 'wisp.iss')
     )
-
-    $missingVars = @($signingVars | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
-    if ($missingVars.Count -eq 0) {
-        $script:canCodeSign = $true
-    } else {
-        Write-Host "====== WARNING ======"
-        Write-Host "One or more of the following variables are missing: $($missingVars -join ', ')"
-        Write-Host "This bundle will not be code signed"
-        Write-Host "====== WARNING ======"
-    }
+    Invoke-Native $iscc $isccArgs
+    Write-Host "Installer: $(Join-Path $OutputDir "Wisp-$Version-$Architecture-setup.exe")"
 }
 
-function PrepareForBundle {
-    if (Test-Path "$innoDir") {
-        Remove-Item -Path "$innoDir" -Recurse -Force
-    }
-    New-Item -Path "$innoDir" -ItemType Directory -Force
-    Copy-Item -Path "$env:ZED_WORKSPACE\crates\zed\resources\windows\*" -Destination "$innoDir" -Recurse -Force
-    New-Item -Path "$innoDir\make_appx" -ItemType Directory -Force
-    New-Item -Path "$innoDir\appx" -ItemType Directory -Force
-    New-Item -Path "$innoDir\bin" -ItemType Directory -Force
-    New-Item -Path "$innoDir\tools" -ItemType Directory -Force
-
-    rustup target add $target
-}
-
-function GenerateLicenses {
-    . $PSScriptRoot/generate-licenses.ps1
-}
-
-function BuildZedAndItsFriends {
-    Write-Output "Building Zed and its friends, for channel: $channel"
-    # Build zed.exe, cli.exe and auto-update-helper.exe
-    cargo --config .cargo/bundle-config.toml build --release --package zed --package cli --package auto_update_helper --target $target
-    Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
-    Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
-    Copy-Item -Path ".\$CargoOutDir\auto-update-helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
-    # Build explorer_command_injector.dll
-    switch ($channel) {
-        "stable" {
-            cargo --config .cargo/bundle-config.toml build --release --features stable --no-default-features --package explorer_command_injector --target $target
-        }
-        "preview" {
-            cargo --config .cargo/bundle-config.toml build --release --features preview --no-default-features --package explorer_command_injector --target $target
-        }
-        default {
-            cargo --config .cargo/bundle-config.toml build --release --package explorer_command_injector --target $target
-        }
-    }
-    Copy-Item -Path ".\$CargoOutDir\explorer_command_injector.dll" -Destination "$innoDir\zed_explorer_command_injector.dll" -Force
-}
-
-function BuildRemoteServer {
-    Write-Output "Building remote_server for $target"
-    cargo --config .cargo/bundle-config.toml build --release --package remote_server --target $target
-
-    # SSH clients expect remote_server.exe inside the archive.
-    Copy-Item -Path ".\$CargoOutDir\remote-server.exe" -Destination "$innoDir\remote_server.exe" -Force
-    $remoteServerSrc = (Resolve-Path "$innoDir\remote_server.exe").Path
-
-    if ($canCodeSign) {
-        Write-Output "Code signing remote_server.exe"
-        & "$innoDir\sign.ps1" $remoteServerSrc
-    }
-
-    $remoteServerDst = "$env:ZED_WORKSPACE\target\zed-remote-server-windows-$Architecture.zip"
-    Write-Output "Compressing remote_server to $remoteServerDst"
-    Compress-Archive -Path $remoteServerSrc -DestinationPath $remoteServerDst -Force
-    Remove-Item -Path $remoteServerSrc -Force
-
-    Write-Output "Remote server compressed successfully"
-}
-
-function ZipZedAndItsFriendsDebug {
-    $items = @(
-        ".\$CargoOutDir\zed.pdb",
-        ".\$CargoOutDir\cli.pdb",
-        ".\$CargoOutDir\auto_update_helper.pdb",
-        ".\$CargoOutDir\explorer_command_injector.pdb",
-        ".\$CargoOutDir\remote_server.pdb"
-    )
-
-    Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip" -Force
-}
-
-
-function UploadToSentry {
-    if (-not (Get-Command "sentry-cli" -ErrorAction SilentlyContinue)) {
-        Write-Output "sentry-cli not found. skipping sentry upload."
-        Write-Output "install with: 'winget install -e --id=Sentry.sentry-cli'"
-        return
-    }
-    if ([string]::IsNullOrWhiteSpace($env:SENTRY_AUTH_TOKEN)) {
-        Write-Output "missing SENTRY_AUTH_TOKEN. skipping sentry upload."
-        return
-    }
-    Write-Output "Uploading zed debug symbols to sentry..."
-    for ($i = 1; $i -le 3; $i++) {
-        try {
-            sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev $CargoOutDir
-            break
-        }
-        catch {
-            Write-Output "Sentry upload attempt $i failed: $_"
-            if ($i -eq 3) {
-                Write-Output "All sentry upload attempts failed"
-                throw
-            }
-            Start-Sleep -Seconds 2
-        }
-    }
-}
-
-function MakeAppx {
-    switch ($channel) {
-        "stable" {
-            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest.xml"
-        }
-        "preview" {
-            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest-Preview.xml"
-        }
-        default {
-            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest-Nightly.xml"
-        }
-    }
-    Copy-Item -Path "$manifestFile" -Destination "$innoDir\make_appx\AppxManifest.xml"
-    # Add makeAppx.exe to Path
-    $sdk = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
-    $env:Path += ';' + $sdk
-    makeAppx.exe pack /d "$innoDir\make_appx" /p "$innoDir\zed_explorer_command_injector.appx" /nv
-}
-
-function SignZedAndItsFriends {
-    if (-not $canCodeSign) {
-        return
-    }
-
-    $files = "$innoDir\Zed.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
-    & "$innoDir\sign.ps1" $files
-}
-
-function DownloadAMDGpuServices {
-    # If you update the AGS SDK version, please also update the version in `crates/gpui/src/platform/windows/directx_renderer.rs`
-    $url = "https://codeload.github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/zip/refs/tags/v6.3.0"
-    $zipPath = ".\AGS_SDK_v6.3.0.zip"
-    # Download the AGS SDK zip file
-    Invoke-WebRequest -Uri $url -OutFile $zipPath
-    # Extract the AGS SDK zip file
-    Expand-Archive -Path $zipPath -DestinationPath "." -Force
-}
-
-function DownloadConpty {
-    # TODO: Switch back to the stable channel once Microsoft finally decides to publish v1.26
-    $url = "https://github.com/microsoft/terminal/releases/download/v1.25.1912.0/Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg"
-    $zipPath = ".\Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg"
-    Invoke-WebRequest -Uri $url -OutFile $zipPath
-    Expand-Archive -Path $zipPath -DestinationPath ".\conpty" -Force
-}
-
-function CollectFiles {
-    Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
-    Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
-    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zed.exe" -Force
-    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
-    Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
-    if($Architecture -eq "aarch64") {
-        New-Item -Type Directory -Path "$innoDir\arm64" -Force
-        Move-Item -Path ".\conpty\build\native\runtimes\arm64\OpenConsole.exe" -Destination "$innoDir\arm64\OpenConsole.exe" -Force
-        Move-Item -Path ".\conpty\runtimes\win-arm64\native\conpty.dll" -Destination "$innoDir\conpty.dll" -Force
-    }
-    else {
-        New-Item -Type Directory -Path "$innoDir\x64" -Force
-        New-Item -Type Directory -Path "$innoDir\arm64" -Force
-        Move-Item -Path ".\AGS_SDK-6.3.0\ags_lib\lib\amd_ags_x64.dll" -Destination "$innoDir\amd_ags_x64.dll" -Force
-        Move-Item -Path ".\conpty\build\native\runtimes\x64\OpenConsole.exe" -Destination "$innoDir\x64\OpenConsole.exe" -Force
-        Move-Item -Path ".\conpty\build\native\runtimes\arm64\OpenConsole.exe" -Destination "$innoDir\arm64\OpenConsole.exe" -Force
-        Move-Item -Path ".\conpty\runtimes\win-x64\native\conpty.dll" -Destination "$innoDir\conpty.dll" -Force
-    }
-}
-
-function BuildInstaller {
-    $issFilePath = "$innoDir\zed.iss"
-    switch ($channel) {
-        "stable" {
-            $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
-            $appIconName = "app-icon"
-            $appName = "Zed"
-            $appDisplayName = "Zed"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Stable-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "Zed"
-            $appUserId = "ZedIndustries.Zed"
-            $appShellNameShort = "Z&ed"
-            $appAppxFullName = "ZedIndustries.Zed_1.0.0.0_neutral__japxn1gcva8rg"
-        }
-        "preview" {
-            $appId = "{{F70E4811-D0E2-4D88-AC99-D63752799F95}"
-            $appIconName = "app-icon-preview"
-            $appName = "Zed Preview"
-            $appDisplayName = "Zed Preview"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Preview-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedPreview"
-            $appUserId = "ZedIndustries.Zed.Preview"
-            $appShellNameShort = "Z&ed Preview"
-            $appAppxFullName = "ZedIndustries.Zed.Preview_1.0.0.0_neutral__japxn1gcva8rg"
-        }
-        "nightly" {
-            $appId = "{{1BDB21D3-14E7-433C-843C-9C97382B2FE0}"
-            $appIconName = "app-icon-nightly"
-            $appName = "Zed Nightly"
-            $appDisplayName = "Zed Nightly"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Nightly-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedNightly"
-            $appUserId = "ZedIndustries.Zed.Nightly"
-            $appShellNameShort = "Z&ed Editor Nightly"
-            $appAppxFullName = "ZedIndustries.Zed.Nightly_1.0.0.0_neutral__japxn1gcva8rg"
-        }
-        "dev" {
-            $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
-            $appIconName = "app-icon-dev"
-            $appName = "Zed Dev"
-            $appDisplayName = "Zed Dev"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Dev-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedDev"
-            $appUserId = "ZedIndustries.Zed.Dev"
-            $appShellNameShort = "Z&ed Dev"
-            $appAppxFullName = "ZedIndustries.Zed.Dev_1.0.0.0_neutral__japxn1gcva8rg"
-        }
-        default {
-            Write-Error "can't bundle installer for $channel."
-            exit 1
-        }
-    }
-
-    # Windows runner 2022 default has iscc in PATH, https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
-    # Currently, we are using Windows 2022 runner.
-    # Windows runner 2025 doesn't have iscc in PATH for now, https://github.com/actions/runner-images/issues/11228
-    $innoSetupPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-
-    $definitions = @{
-        "AppId"          = $appId
-        "AppIconName"    = $appIconName
-        "OutputDir"      = "$env:ZED_WORKSPACE\target"
-        "AppSetupName"   = $appSetupName
-        "AppName"        = $appName
-        "AppDisplayName" = $appDisplayName
-        "RegValueName"   = $regValueName
-        "AppMutex"       = $appMutex
-        "AppExeName"     = $appExeName
-        "ResourcesDir"   = "$innoDir"
-        "ShellNameShort" = $appShellNameShort
-        "AppUserId"      = $appUserId
-        "Version"        = "$env:RELEASE_VERSION"
-        "SourceDir"      = "$env:ZED_WORKSPACE"
-        "AppxFullName"   = $appAppxFullName
-    }
-
-    $defs = @()
-    foreach ($key in $definitions.Keys) {
-        $defs += "/d$key=`"$($definitions[$key])`""
-    }
-
-    $innoArgs = @($issFilePath) + $defs
-    if($canCodeSign) {
-        # Checked by zed.iss to decide whether to sign the installer.
-        $env:ZED_SIGN_BUNDLE = "1"
-        $signTool = "powershell.exe -ExecutionPolicy Bypass -File $innoDir\sign.ps1 `$f"
-        $innoArgs += "/sDefaultsign=`"$signTool`""
-    }
-
-    # Execute Inno Setup
-    Write-Host "🚀 Running Inno Setup: $innoSetupPath $innoArgs"
-    $process = Start-Process -FilePath $innoSetupPath -ArgumentList $innoArgs -NoNewWindow -Wait -PassThru
-
-    if ($process.ExitCode -eq 0) {
-        Write-Host "✅ Inno Setup successfully compiled the installer"
-        Write-Output "SETUP_PATH=target/$appSetupName.exe" >> $env:GITHUB_ENV
-        $script:buildSuccess = $true
-    }
-    else {
-        Write-Host "❌ Inno Setup failed: $($process.ExitCode)"
-        $script:buildSuccess = $false
-    }
-}
-
-ParseZedWorkspace
-$innoDir = "$env:ZED_WORKSPACE\inno\$Architecture"
-$debugArchive = "$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
-$debugStoreKey = "$env:ZED_RELEASE_CHANNEL/zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
-
-CheckEnvironmentVariables
-PrepareForBundle
-GenerateLicenses
-BuildZedAndItsFriends
-BuildRemoteServer
-MakeAppx
-SignZedAndItsFriends
-ZipZedAndItsFriendsDebug
-DownloadAMDGpuServices
-DownloadConpty
-CollectFiles
-BuildInstaller
-
-if($env:CI) {
-    UploadToSentry
-}
-
-if ($buildSuccess) {
-    Write-Output "Build successful"
-    if ($Install) {
-        Write-Output "Installing Zed..."
-        Start-Process -FilePath "$env:ZED_WORKSPACE/target/ZedEditorUserSetup-x64-$env:RELEASE_VERSION.exe"
-    }
-    exit 0
-}
-else {
-    Write-Output "Build failed"
-    exit 1
-}
+Write-Host 'Bundle finished.'

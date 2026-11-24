@@ -1,0 +1,86 @@
+# Lightweight CI: type-check the main Windows app and the Linux remote server.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  check-windows:
+    name: cargo check -p zed (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-windows-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # build scripts run during `cargo check`, so msvc_spectre_libs needs this too.
+      - name: Setup MSVC Spectre-mitigated libs
+        uses: ./.github/actions/setup-msvc-spectre
+        with:
+          arch: x64
+
+      - name: cargo check
+        run: |
+          cargo check --package zed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  check-remote-server:
+    name: cargo check -p remote_server (Linux musl)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools musl-dev build-essential cmake clang lld pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: x86_64-unknown-linux-musl
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-remote-server-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: cargo check
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo check --package remote_server --target x86_64-unknown-linux-musl
