@@ -54,7 +54,7 @@
 - [x] .github/workflows/release.yml（tag v* → Linux remote server x86_64/aarch64 + Windows 安装包/便携版 → Release）
 - [x] .github/workflows/ci.yml
 - [x] crates/zed/resources/windows/wisp.iss（新 AppId、wisp://、用 Wisp 打开）、script/bundle-windows.ps1
-- [ ] 首次在 GitHub 上实际运行
+- [x] 首次在 GitHub 上实际运行：CI 通过；Release v0.1.0 已发布（setup.exe、portable.zip、remote server x86_64/aarch64、SHA256SUMS），Windows 构建约 44 分钟
 
 ## 审查记录
 - 验证：每个里程碑 `cargo build -p zed` 无 error / warning；启动截图见 .tasks/shots/
