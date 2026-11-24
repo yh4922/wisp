@@ -388,6 +388,9 @@ struct PanelEntry {
 
 pub struct PanelButtons {
     dock: Entity<Dock>,
+    /// Renders as a vertical stack of large buttons for the activity bar
+    /// instead of a compact row in the status bar.
+    vertical: bool,
     _settings_subscription: Subscription,
 }
 
@@ -1388,7 +1391,15 @@ impl PanelButtons {
         let settings_subscription = cx.observe_global::<SettingsStore>(|_, cx| cx.notify());
         Self {
             dock,
+            vertical: false,
             _settings_subscription: settings_subscription,
+        }
+    }
+
+    pub fn new_vertical(dock: Entity<Dock>, cx: &mut Context<Self>) -> Self {
+        Self {
+            vertical: true,
+            ..Self::new(dock, cx)
         }
     }
 }
@@ -1399,8 +1410,10 @@ impl Render for PanelButtons {
         let active_index = dock.active_panel_index;
         let is_open = dock.is_open;
         let dock_position = dock.position;
+        let vertical = self.vertical;
 
         let (menu_anchor, menu_attach) = match dock.position {
+            _ if vertical => (Anchor::TopLeft, Anchor::TopRight),
             DockPosition::Left => (Anchor::BottomLeft, Anchor::TopLeft),
             DockPosition::Bottom | DockPosition::Right => (Anchor::BottomRight, Anchor::TopRight),
         };
@@ -1544,11 +1557,16 @@ impl Render for PanelButtons {
                         })
                         .anchor(menu_anchor)
                         .attach(menu_attach)
-                        .trigger(move |is_active, _window, _cx| {
+                        .trigger(move |is_active, _window, cx| {
                             // Include active state in element ID to invalidate the cached
                             // tooltip when panel state changes (e.g., via keyboard shortcut)
-                            let button = IconButton::new((name, is_active_button as u64), icon)
-                                .icon_size(IconSize::Small)
+                            let button_id = (name, is_active_button as u64);
+                            let button = if vertical {
+                                crate::activity_bar::activity_bar_button(button_id, icon)
+                            } else {
+                                IconButton::new(button_id, icon).icon_size(IconSize::Small)
+                            };
+                            let button = button
                                 .toggle_state(is_active_button)
                                 .tab_index(0isize)
                                 .aria_label(icon_tooltip)
@@ -1565,13 +1583,23 @@ impl Render for PanelButtons {
                                     })
                                 });
 
-                            div().relative().child(button).when_some(
-                                icon_label
-                                    .clone()
-                                    .filter(|_| !is_active_button)
-                                    .and_then(|label| label.parse::<usize>().ok()),
-                                |this, count| this.child(CountBadge::new(count)),
-                            )
+                            let count = icon_label
+                                .clone()
+                                .filter(|_| !is_active_button)
+                                .and_then(|label| label.parse::<usize>().ok());
+                            let button = div()
+                                .relative()
+                                .child(button)
+                                .when_some(count, |this, count| this.child(CountBadge::new(count)));
+                            if vertical {
+                                crate::activity_bar::activity_bar_entry(
+                                    button,
+                                    is_active_button,
+                                    cx,
+                                )
+                            } else {
+                                button
+                            }
                         }),
                 )
             })
@@ -1582,6 +1610,14 @@ impl Render for PanelButtons {
         }
 
         let has_buttons = !buttons.is_empty();
+
+        if vertical {
+            return v_flex()
+                .w_full()
+                .gap_2()
+                .children(buttons)
+                .into_any_element();
+        }
 
         h_flex()
             .gap_1()
@@ -1595,6 +1631,7 @@ impl Render for PanelButtons {
             .when(has_buttons && dock.position == DockPosition::Left, |this| {
                 this.child(Divider::vertical().color(DividerColor::Border))
             })
+            .into_any_element()
     }
 }
 

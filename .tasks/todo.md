@@ -66,3 +66,12 @@
   4. 保留 edit_prediction_types、dap、client（精简）等休眠代码
   5. tailwind / eslint LSP 会挂到 HTML / Vue / PHP 上自动启动
   6. 安装包未代码签名（SmartScreen 会提示）
+
+## UI 调整：左侧活动栏（参考 VS Code）
+- [x] workspace：新增 ActivityBar（标题栏与状态栏之间、最左侧竖条，48px，图标 24px，选中项左侧强调条）
+- [x] 左 Dock 面板按钮（项目面板、工作区等）从状态栏移入活动栏，竖排大尺寸
+- [x] 搜索按钮移入活动栏
+- [x] 诊断：错误/警告计数图标移入活动栏（角标显示数量）；状态栏仅保留当前诊断消息
+- [x] cargo build 验证 + 启动截图
+- 验证：cargo build -p zed 通过；以 ZED_RELEASE_CHANNEL=dev 启动调试版（避免与已安装的 stable 实例单实例冲突），截图见 .tasks/shots/activity-bar.png
+- 剩余风险：Zed 的按钮高度上限为 32px，图标 24px 时靠条目间距拉开；状态栏右键「隐藏按钮」对搜索/诊断不再可用（仍可通过设置 search.button / diagnostics.button 隐藏）

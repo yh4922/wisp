@@ -8,19 +8,21 @@ use gpui::{
 use language::Diagnostic;
 use project::project_settings::{GoToDiagnosticSeverityFilter, ProjectSettings};
 use settings::Settings;
-use ui::{Button, ButtonLike, Color, Icon, IconName, Label, Tooltip, h_flex, prelude::*};
+use ui::{Button, Color, CountBadge, IconName, Tooltip, h_flex, prelude::*};
 use util::ResultExt;
 use workspace::{HideStatusItem, StatusItemView, ToolbarItemEvent, Workspace, item::ItemHandle};
 
 use crate::{Deploy, IncludeWarnings, ProjectDiagnosticsEditor};
 
-/// The status bar item that displays diagnostic counts.
+/// Displays diagnostic counts in the activity bar, or the diagnostic under the
+/// cursor in the status bar.
 pub struct DiagnosticIndicator {
     summary: project::DiagnosticSummary,
     workspace: WeakEntity<Workspace>,
     current_diagnostic: Option<Diagnostic>,
     active_editor: Option<WeakEntity<Editor>>,
     _observe_active_editor: Option<Subscription>,
+    activity_bar: bool,
 
     diagnostics_update: Task<()>,
     diagnostic_summary_update: Task<()>,
@@ -33,32 +35,14 @@ impl Render for DiagnosticIndicator {
             return indicator.hidden();
         }
 
-        let diagnostic_indicator = match (self.summary.error_count, self.summary.warning_count) {
-            (0, 0) => h_flex().child(
-                Icon::new(IconName::Check)
-                    .size(IconSize::Small)
-                    .color(Color::Default),
-            ),
-            (error_count, warning_count) => h_flex()
-                .gap_1()
-                .when(error_count > 0, |this| {
-                    this.child(
-                        Icon::new(IconName::XCircle)
-                            .size(IconSize::Small)
-                            .color(Color::Error),
-                    )
-                    .child(Label::new(error_count.to_string()).size(LabelSize::Small))
-                })
-                .when(warning_count > 0, |this| {
-                    this.child(
-                        Icon::new(IconName::Warning)
-                            .size(IconSize::Small)
-                            .color(Color::Warning),
-                    )
-                    .child(Label::new(warning_count.to_string()).size(LabelSize::Small))
-                }),
-        };
+        if self.activity_bar {
+            return indicator
+                .w_full()
+                .child(self.render_activity_bar_button(cx));
+        }
 
+        // The error/warning counts live in the activity bar; the status bar
+        // instance only shows the diagnostic under the cursor.
         let status = if let Some(diagnostic) = &self.current_diagnostic {
             let message = diagnostic
                 .message
@@ -91,7 +75,14 @@ impl Render for DiagnosticIndicator {
             None
         };
 
-        let diagnostics_label = match (self.summary.error_count, self.summary.warning_count) {
+        indicator.children(status)
+    }
+}
+
+impl DiagnosticIndicator {
+    fn render_activity_bar_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (error_count, warning_count) = (self.summary.error_count, self.summary.warning_count);
+        let diagnostics_label = match (error_count, warning_count) {
             (0, 0) => i18n::t("Project diagnostics: no problems").to_string(),
             (errors, warnings) => {
                 let mut parts = Vec::new();
@@ -112,39 +103,66 @@ impl Render for DiagnosticIndicator {
                 i18n::tf!("Project diagnostics: {parts}", parts = parts.join(", "))
             }
         };
+        let icon_color = if error_count > 0 {
+            Color::Error
+        } else if warning_count > 0 {
+            Color::Warning
+        } else {
+            Color::Muted
+        };
+        let tooltip_meta = SharedString::from(diagnostics_label.clone());
 
-        indicator
-            .child(
-                ButtonLike::new("diagnostic-indicator")
-                    .child(diagnostic_indicator)
-                    .tab_index(0isize)
-                    .aria_label(diagnostics_label)
-                    .tooltip(move |_window, cx| {
-                        Tooltip::for_action(i18n::t("Project Diagnostics"), &Deploy, cx)
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(workspace) = this.workspace.upgrade() {
-                            if this.summary.error_count == 0 && this.summary.warning_count > 0 {
-                                cx.update_default_global(
-                                    |show_warnings: &mut IncludeWarnings, _| show_warnings.0 = true,
-                                );
-                            }
-                            workspace.update(cx, |workspace, cx| {
-                                ProjectDiagnosticsEditor::deploy(
-                                    workspace,
-                                    &Default::default(),
-                                    window,
-                                    cx,
-                                )
-                            })
+        let button =
+            workspace::activity_bar::activity_bar_button("diagnostic-indicator", IconName::Warning)
+                .icon_color(icon_color)
+                .tab_index(0isize)
+                .aria_label(diagnostics_label)
+                .tooltip(move |_window, cx| {
+                    Tooltip::with_meta(
+                        i18n::t("Project Diagnostics"),
+                        Some(&Deploy),
+                        tooltip_meta.clone(),
+                        cx,
+                    )
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if let Some(workspace) = this.workspace.upgrade() {
+                        if this.summary.error_count == 0 && this.summary.warning_count > 0 {
+                            cx.update_default_global(|show_warnings: &mut IncludeWarnings, _| {
+                                show_warnings.0 = true
+                            });
                         }
-                    })),
-            )
-            .children(status)
-    }
-}
+                        workspace.update(cx, |workspace, cx| {
+                            ProjectDiagnosticsEditor::deploy(
+                                workspace,
+                                &Default::default(),
+                                window,
+                                cx,
+                            )
+                        })
+                    }
+                }));
 
-impl DiagnosticIndicator {
+        let total = error_count + warning_count;
+        workspace::activity_bar::activity_bar_entry(
+            div()
+                .relative()
+                .child(button)
+                .when(total > 0, |this| this.child(CountBadge::new(total))),
+            false,
+            cx,
+        )
+    }
+
+    /// Creates the compact variant shown in the activity bar, which only
+    /// displays the error/warning counts.
+    pub fn new_for_activity_bar(workspace: &Workspace, cx: &mut Context<Self>) -> Self {
+        Self {
+            activity_bar: true,
+            ..Self::new(workspace, cx)
+        }
+    }
+
     pub fn new(workspace: &Workspace, cx: &mut Context<Self>) -> Self {
         let project = workspace.project();
         cx.subscribe(project, |this, project, event, cx| match event {
@@ -181,6 +199,7 @@ impl DiagnosticIndicator {
             workspace: workspace.weak_handle(),
             current_diagnostic: None,
             _observe_active_editor: None,
+            activity_bar: false,
             diagnostics_update: Task::ready(()),
             diagnostic_summary_update: Task::ready(()),
         }

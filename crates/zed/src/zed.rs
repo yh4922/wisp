@@ -519,6 +519,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let search_button = cx.new(|_| search::search_status_button::SearchButton::new());
         let diagnostic_summary =
             cx.new(|cx| diagnostics::items::DiagnosticIndicator::new(workspace, cx));
+        let diagnostic_counts = cx
+            .new(|cx| diagnostics::items::DiagnosticIndicator::new_for_activity_bar(workspace, cx));
         let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
         let activity_indicator = activity_indicator::ActivityIndicator::new(workspace, window, cx);
         let active_buffer_encoding =
@@ -545,8 +547,11 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let line_ending_indicator =
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
+        workspace.activity_bar().update(cx, |activity_bar, cx| {
+            activity_bar.add_item(search_button, cx);
+            activity_bar.add_item(diagnostic_counts, cx);
+        });
         workspace.status_bar().update(cx, |status_bar, cx| {
-            status_bar.add_left_item(search_button, window, cx);
             status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);

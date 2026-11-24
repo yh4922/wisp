@@ -1,4 +1,5 @@
 pub mod active_file_name;
+pub mod activity_bar;
 pub mod dock;
 pub mod history_manager;
 pub mod invalid_item_view;
@@ -39,6 +40,7 @@ pub use path_list::{PathList, SerializedPathList};
 pub use remote::RemoteConnectionIdentity;
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
 
+use activity_bar::ActivityBar;
 use anyhow::{Context as _, Result, anyhow};
 use client::{
     Client, ErrorExt, TypedEnvelope, UserStore,
@@ -1657,6 +1659,7 @@ pub struct Workspace {
     last_active_center_pane: Option<WeakEntity<Pane>>,
     last_active_view_id: Option<proto::ViewId>,
     status_bar: Entity<StatusBar>,
+    activity_bar: Entity<ActivityBar>,
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
     titlebar_item: Option<AnyView>,
@@ -2004,7 +2007,12 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
-        let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
+        let left_dock_buttons = cx.new(|cx| PanelButtons::new_vertical(left_dock.clone(), cx));
+        let activity_bar = cx.new(|cx| {
+            let mut activity_bar = ActivityBar::new();
+            activity_bar.add_item(left_dock_buttons, cx);
+            activity_bar
+        });
         let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
         let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
         let multi_workspace = window
@@ -2014,7 +2022,6 @@ impl Workspace {
         let status_bar = cx.new(|cx| {
             let mut status_bar =
                 StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx);
-            status_bar.add_left_item(left_dock_buttons, window, cx);
             status_bar.add_right_item(right_dock_buttons, window, cx);
             status_bar.add_right_item(bottom_dock_buttons, window, cx);
             status_bar
@@ -2122,6 +2129,7 @@ impl Workspace {
             last_active_center_pane: Some(center_pane.downgrade()),
             last_active_view_id: None,
             status_bar,
+            activity_bar,
             modal_layer,
             toast_layer,
             titlebar_item: None,
@@ -2914,6 +2922,10 @@ impl Workspace {
 
     pub fn status_bar(&self) -> &Entity<StatusBar> {
         &self.status_bar
+    }
+
+    pub fn activity_bar(&self) -> &Entity<ActivityBar> {
+        &self.activity_bar
     }
 
     pub fn set_sidebar_focus_handle(&mut self, handle: Option<FocusHandle>) {
@@ -9462,100 +9474,114 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .child(
-                        div()
-                            .id("workspace")
-                            .bg(colors.background)
-                            .relative()
+                        // The activity bar sits outside `#workspace` so the dock
+                        // resize math, which uses `self.bounds` measured inside it,
+                        // stays relative to the dock area.
+                        h_flex()
                             .flex_1()
                             .w_full()
-                            .flex()
-                            .flex_col()
+                            .min_h_0()
                             .overflow_hidden()
-                            .border_t_1()
-                            .border_b_1()
-                            .border_color(colors.border)
-                            .child({
-                                let this = cx.entity();
-                                canvas(
-                                    move |bounds, window, cx| {
-                                        this.update(cx, |this, cx| {
-                                            let bounds_changed = this.bounds != bounds;
-                                            this.bounds = bounds;
+                            .child(self.activity_bar.clone())
+                            .child(
+                                div()
+                                    .id("workspace")
+                                    .bg(colors.background)
+                                    .relative()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .border_t_1()
+                                    .border_b_1()
+                                    .border_color(colors.border)
+                                    .child({
+                                        let this = cx.entity();
+                                        canvas(
+                                            move |bounds, window, cx| {
+                                                this.update(cx, |this, cx| {
+                                                    let bounds_changed = this.bounds != bounds;
+                                                    this.bounds = bounds;
 
-                                            if bounds_changed {
-                                                this.left_dock.update(cx, |dock, cx| {
-                                                    dock.clamp_panel_size(
-                                                        bounds.size.width,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
+                                                    if bounds_changed {
+                                                        this.left_dock.update(cx, |dock, cx| {
+                                                            dock.clamp_panel_size(
+                                                                bounds.size.width,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        });
 
-                                                this.right_dock.update(cx, |dock, cx| {
-                                                    dock.clamp_panel_size(
-                                                        bounds.size.width,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
+                                                        this.right_dock.update(cx, |dock, cx| {
+                                                            dock.clamp_panel_size(
+                                                                bounds.size.width,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        });
 
-                                                this.bottom_dock.update(cx, |dock, cx| {
-                                                    dock.clamp_panel_size(
-                                                        bounds.size.height,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
-                                            }
-                                        })
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .size_full()
-                            })
-                            .when(self.zoomed.is_none(), |this| {
-                                this.on_drag_move(cx.listener(
-                                    move |workspace, e: &DragMoveEvent<DraggedDock>, window, cx| {
-                                        if workspace.previous_dock_drag_coordinates
-                                            != Some(e.event.position)
-                                        {
-                                            workspace.previous_dock_drag_coordinates =
-                                                Some(e.event.position);
+                                                        this.bottom_dock.update(cx, |dock, cx| {
+                                                            dock.clamp_panel_size(
+                                                                bounds.size.height,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        });
+                                                    }
+                                                })
+                                            },
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .size_full()
+                                    })
+                                    .when(self.zoomed.is_none(), |this| {
+                                        this.on_drag_move(cx.listener(
+                                            move |workspace,
+                                                  e: &DragMoveEvent<DraggedDock>,
+                                                  window,
+                                                  cx| {
+                                                if workspace.previous_dock_drag_coordinates
+                                                    != Some(e.event.position)
+                                                {
+                                                    workspace.previous_dock_drag_coordinates =
+                                                        Some(e.event.position);
 
-                                            match e.drag(cx).0 {
-                                                DockPosition::Left => {
-                                                    workspace.resize_left_dock(
-                                                        e.event.position.x
-                                                            - workspace.bounds.left(),
-                                                        window,
-                                                        cx,
-                                                    );
+                                                    match e.drag(cx).0 {
+                                                        DockPosition::Left => {
+                                                            workspace.resize_left_dock(
+                                                                e.event.position.x
+                                                                    - workspace.bounds.left(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        }
+                                                        DockPosition::Right => {
+                                                            workspace.resize_right_dock(
+                                                                workspace.bounds.right()
+                                                                    - e.event.position.x,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        }
+                                                        DockPosition::Bottom => {
+                                                            workspace.resize_bottom_dock(
+                                                                workspace.bounds.bottom()
+                                                                    - e.event.position.y,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        }
+                                                    };
+                                                    workspace.serialize_workspace(window, cx);
                                                 }
-                                                DockPosition::Right => {
-                                                    workspace.resize_right_dock(
-                                                        workspace.bounds.right()
-                                                            - e.event.position.x,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                                DockPosition::Bottom => {
-                                                    workspace.resize_bottom_dock(
-                                                        workspace.bounds.bottom()
-                                                            - e.event.position.y,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                            };
-                                            workspace.serialize_workspace(window, cx);
-                                        }
-                                    },
-                                ))
-                            })
-                            .child({
-                                match bottom_dock_layout {
+                                            },
+                                        ))
+                                    })
+                                    .child({
+                                        match bottom_dock_layout {
                                     BottomDockLayout::Full => div()
                                         .flex()
                                         .flex_col()
@@ -9795,57 +9821,73 @@ impl Render for Workspace {
                                             cx,
                                         )),
                                 }
-                            })
-                            .children(self.zoomed.as_ref().and_then(|view| {
-                                let zoomed_view = view.upgrade()?;
-                                let zoomed_element = match zoomed_paddings {
-                                    (None, None) => zoomed_view.into_any_element(),
-                                    (left, right) => h_flex()
-                                        .size_full()
-                                        .when_some(left, |this, padding| {
-                                            this.child(padding.border_r_1().debug_selector(|| {
-                                                "zoomed_centered_layout_left_padding".into()
-                                            }))
-                                        })
-                                        .child(
-                                            div()
+                                    })
+                                    .children(self.zoomed.as_ref().and_then(|view| {
+                                        let zoomed_view = view.upgrade()?;
+                                        let zoomed_element = match zoomed_paddings {
+                                            (None, None) => zoomed_view.into_any_element(),
+                                            (left, right) => h_flex()
                                                 .size_full()
-                                                .debug_selector(|| {
-                                                    "zoomed_centered_layout_content".into()
+                                                .when_some(left, |this, padding| {
+                                                    this.child(padding.border_r_1().debug_selector(
+                                                        || {
+                                                            "zoomed_centered_layout_left_padding"
+                                                                .into()
+                                                        },
+                                                    ))
                                                 })
-                                                .child(zoomed_view),
-                                        )
-                                        .when_some(right, |this, padding| {
-                                            this.child(padding.border_l_1().debug_selector(|| {
-                                                "zoomed_centered_layout_right_padding".into()
-                                            }))
+                                                .child(
+                                                    div()
+                                                        .size_full()
+                                                        .debug_selector(|| {
+                                                            "zoomed_centered_layout_content".into()
+                                                        })
+                                                        .child(zoomed_view),
+                                                )
+                                                .when_some(right, |this, padding| {
+                                                    this.child(padding.border_l_1().debug_selector(
+                                                        || {
+                                                            "zoomed_centered_layout_right_padding"
+                                                                .into()
+                                                        },
+                                                    ))
+                                                })
+                                                .into_any_element(),
+                                        };
+                                        let overlay = div()
+                                            .occlude()
+                                            .absolute()
+                                            .overflow_hidden()
+                                            .border_color(colors.border)
+                                            .bg(colors.background)
+                                            .child(zoomed_element)
+                                            .inset_0()
+                                            .shadow_lg();
+
+                                        if !WorkspaceSettings::get_global(cx).zoomed_padding {
+                                            return Some(overlay);
+                                        }
+
+                                        Some(match self.zoomed_position {
+                                            Some(DockPosition::Left) => {
+                                                overlay.right_2().border_r_1()
+                                            }
+                                            Some(DockPosition::Right) => {
+                                                overlay.left_2().border_l_1()
+                                            }
+                                            Some(DockPosition::Bottom) => {
+                                                overlay.top_2().border_t_1()
+                                            }
+                                            None => overlay
+                                                .top_2()
+                                                .bottom_2()
+                                                .left_2()
+                                                .right_2()
+                                                .border_1(),
                                         })
-                                        .into_any_element(),
-                                };
-                                let overlay = div()
-                                    .occlude()
-                                    .absolute()
-                                    .overflow_hidden()
-                                    .border_color(colors.border)
-                                    .bg(colors.background)
-                                    .child(zoomed_element)
-                                    .inset_0()
-                                    .shadow_lg();
-
-                                if !WorkspaceSettings::get_global(cx).zoomed_padding {
-                                    return Some(overlay);
-                                }
-
-                                Some(match self.zoomed_position {
-                                    Some(DockPosition::Left) => overlay.right_2().border_r_1(),
-                                    Some(DockPosition::Right) => overlay.left_2().border_l_1(),
-                                    Some(DockPosition::Bottom) => overlay.top_2().border_t_1(),
-                                    None => {
-                                        overlay.top_2().bottom_2().left_2().right_2().border_1()
-                                    }
-                                })
-                            }))
-                            .children(self.render_notifications(window, cx)),
+                                    }))
+                                    .children(self.render_notifications(window, cx)),
+                            ),
                     )
                     .when(self.status_bar_visible(cx), |parent| {
                         parent.child(self.status_bar.clone())

@@ -27,9 +27,8 @@ impl Render for SearchButton {
         }
 
         let focus_handle = self.pane_item_focus_handle.clone();
-        button.child(
-            IconButton::new("project-search-indicator", SEARCH_ICON)
-                .icon_size(IconSize::Small)
+        let search_button =
+            workspace::activity_bar::activity_bar_button("project-search-indicator", SEARCH_ICON)
                 .tab_index(0isize)
                 .aria_label("Project Search")
                 .tooltip(move |_window, cx| {
@@ -50,8 +49,14 @@ impl Render for SearchButton {
                 })
                 .on_click(cx.listener(|_this, _, window, cx| {
                     window.dispatch_action(Box::new(workspace::DeploySearch::default()), cx);
-                })),
-        )
+                }));
+        button
+            .w_full()
+            .child(workspace::activity_bar::activity_bar_entry(
+                search_button,
+                false,
+                cx,
+            ))
     }
 }
 
